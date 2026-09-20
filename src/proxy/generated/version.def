@@ -1,0 +1,18 @@
+EXPORTS
+    GetFileVersionInfoA=odg_version_stub_1 @1
+    GetFileVersionInfoByHandle=odg_version_stub_2 @2
+    GetFileVersionInfoExA=odg_version_stub_3 @3
+    GetFileVersionInfoExW=odg_version_stub_4 @4
+    GetFileVersionInfoSizeA=odg_version_stub_5 @5
+    GetFileVersionInfoSizeExA=odg_version_stub_6 @6
+    GetFileVersionInfoSizeExW=odg_version_stub_7 @7
+    GetFileVersionInfoSizeW=odg_version_stub_8 @8
+    GetFileVersionInfoW=odg_version_stub_9 @9
+    VerFindFileA=odg_version_stub_10 @10
+    VerFindFileW=odg_version_stub_11 @11
+    VerInstallFileA=odg_version_stub_12 @12
+    VerInstallFileW=odg_version_stub_13 @13
+    VerLanguageNameA=odg_version_stub_14 @14
+    VerLanguageNameW=odg_version_stub_15 @15
+    VerQueryValueA=odg_version_stub_16 @16
+    VerQueryValueW=odg_version_stub_17 @17

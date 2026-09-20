@@ -1,0 +1,7 @@
+EXPORTS
+    DirectInput8Create=odg_dinput8_stub_1 @1
+    DllCanUnloadNow=odg_dinput8_stub_2 @2
+    DllGetClassObject=odg_dinput8_stub_3 @3
+    DllRegisterServer=odg_dinput8_stub_4 @4
+    DllUnregisterServer=odg_dinput8_stub_5 @5
+    GetdfDIJoystick=odg_dinput8_stub_6 @6

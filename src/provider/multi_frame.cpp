@@ -1,0 +1,153 @@
+#include "provider/multi_frame.h"
+
+#include "core/log.h"
+#include "core/pe.h"
+#include "core/signature.h"
+#include "core/x86.h"
+#include "kernels/device.h"
+
+#include <libhat/process.hpp>
+#include <libhat/scanner.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <span>
+#include <string>
+#include <string_view>
+
+namespace odg::provider {
+namespace {
+
+// The builds checked carry two to four comparisons. None means the runtime
+// gates some other way; many more means the pattern is matching something else.
+// Either way nothing is rewritten.
+constexpr size_t kMaxGates = 4;
+
+// Parameters the runtime publishes for the game to read.
+constexpr std::string_view kParameterPrefix = "DLSSG.";
+constexpr std::string_view kMultiFrameParameter = "DLSSG.MultiFrameCountMax";
+constexpr size_t kMaxParameterLength = 64;
+// How far past a comparison its result is published. The builds checked load
+// the parameter name within four instructions of the comparison.
+constexpr int kInstructionsToPublication = 8;
+
+std::atomic<bool> g_enabled{true};
+std::atomic<bool> g_done{false};
+
+// `cmp r32, imm32` against Blackwell's id, in its two encodings:
+//   3D id          cmp eax, imm32
+//   81 11111??? id cmp r32, imm32: ModRM mod 11 (register), reg 111 (/7 cmp)
+// The second also matches the opcode of the form with a REX prefix, which
+// leaves the immediate at the same place.
+struct Encoding {
+    hat::signature pattern;
+    size_t immediate; // offset of the imm32 within the match
+};
+
+std::vector<Encoding> Encodings() {
+    hat::signature eax = signature::Parse("3D");
+    signature::Append(eax, uint32_t{kernels::kNvApiBlackwell});
+    hat::signature reg = signature::Parse("81 11111???");
+    signature::Append(reg, uint32_t{kernels::kNvApiBlackwell});
+    return {{eax, 1}, {reg, 2}};
+}
+
+// The NUL-terminated text at `address`, when it lies inside `image` and names a
+// published parameter.
+std::string ParameterAt(std::span<const std::byte> image, const std::byte* address) {
+    if (address < image.data() || address >= image.data() + image.size())
+        return {};
+    char text[kMaxParameterLength] = {};
+    const size_t available = static_cast<size_t>(image.data() + image.size() - address);
+    if (!pe::SafeCopy(text, address, std::min(available, sizeof(text) - 1)))
+        return {};
+    const std::string name(text);
+    return name.starts_with(kParameterPrefix) ? name : std::string{};
+}
+
+// The DLSSG parameter whose name is loaded shortly after `compare`, if any.
+std::string PublishedParameter(std::span<const std::byte> image, const std::byte* compare) {
+    const std::byte* cursor = compare;
+    for (int i = 0; i < kInstructionsToPublication; ++i) {
+        const auto instruction = x86::Decode(cursor);
+        if (!instruction)
+            break;
+        if (const auto operand = x86::RipRelativeOperand(*instruction)) {
+            std::string name = ParameterAt(image, *operand);
+            if (!name.empty())
+                return name;
+        }
+        cursor = instruction->Next();
+    }
+    return {};
+}
+
+} // namespace
+
+std::vector<Gate> FindMultiFrameGates(HMODULE provider) {
+    std::vector<Gate> gates;
+    const auto module = hat::process::module_at(provider);
+    if (!module)
+        return gates;
+    const std::span<const std::byte> image = module->get_module_data();
+    const std::span<const std::byte> code = module->get_executable_data();
+    for (const Encoding& encoding : Encodings()) {
+        for (const auto& match : hat::find_all_pattern(code, encoding.pattern)) {
+            // Decoding at the match confirms the bytes form one instruction of
+            // the expected length, not the tail of something else.
+            const auto compare = x86::Decode(match.get());
+            if (!compare || compare->length != encoding.immediate + sizeof(uint32_t))
+                continue;
+            Gate gate;
+            gate.immediate = match.get() + encoding.immediate;
+            gate.publishes = PublishedParameter(image, compare->Next());
+            gate.unlock = gate.publishes.empty() || gate.publishes == kMultiFrameParameter;
+            gates.push_back(std::move(gate));
+        }
+    }
+    return gates;
+}
+
+void SetMultiFrameEnabled(bool enabled) {
+    g_enabled.store(enabled, std::memory_order_release);
+}
+
+bool MultiFrameEnabled() {
+    return g_enabled.load(std::memory_order_acquire);
+}
+
+void UnlockMultiFrame(HMODULE provider, bool at_load) {
+    if (!provider || !MultiFrameEnabled() || g_done.exchange(true))
+        return;
+    const auto gates = FindMultiFrameGates(provider);
+    const auto unlocked = std::count_if(gates.begin(), gates.end(),
+                                        [](const Gate& gate) { return gate.unlock; });
+    const bool advertised = std::any_of(gates.begin(), gates.end(), [](const Gate& gate) {
+        return gate.publishes == kMultiFrameParameter;
+    });
+    if (!advertised || gates.size() > kMaxGates) {
+        log::Event(log::Level::Warning, "multi_frame_gates_not_found",
+                   {log::Field::Uint("matches", gates.size()),
+                    log::Field::Bool("count_gate_found", advertised),
+                    log::Field::Str("note", "this runtime stays at 2x")});
+        return;
+    }
+
+    const uint32_t reported = kernels::kNvApiAda;
+    size_t patched = 0;
+    for (const Gate& gate : gates) {
+        if (!gate.unlock) {
+            log::Event(log::Level::Info, "multi_frame_gate_left",
+                       {log::Field::Str("publishes", gate.publishes)});
+            continue;
+        }
+        patched += pe::PatchCode(gate.immediate, &reported, sizeof(reported)) ? 1 : 0;
+    }
+    log::Event(patched == static_cast<size_t>(unlocked) ? log::Level::Info : log::Level::Warning,
+               "multi_frame_unlocked",
+               {log::Field::Uint("gates", static_cast<size_t>(unlocked)),
+                log::Field::Uint("patched", patched), log::Field::Bool("at_load", at_load)});
+}
+
+} // namespace odg::provider

@@ -1,0 +1,27 @@
+/build/
+/build-*/
+/out/
+/dist/
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+compile_commands.json
+.cache/
+.vs/
+.vscode/
+!/.vscode/settings.json
+CMakeUserPresets.json
+
+# Local, user-supplied NVIDIA material. Never commit these.
+/assets/runtime/
+/assets/kernels/
+*.cubin
+*.ptx
+*.fatbin
+nvngx_dlssg*.dll

@@ -1,0 +1,21 @@
+EXPORTS
+    ApplyCompatResolutionQuirking=odg_dxgi_stub_1 @1
+    CompatString=odg_dxgi_stub_2 @2
+    CompatValue=odg_dxgi_stub_3 @3
+    DXGIDumpJournal=odg_dxgi_stub_4 @4
+    PIXBeginCapture=odg_dxgi_stub_5 @5
+    PIXEndCapture=odg_dxgi_stub_6 @6
+    PIXGetCaptureState=odg_dxgi_stub_7 @7
+    SetAppCompatStringPointer=odg_dxgi_stub_8 @8
+    UpdateHMDEmulationStatus=odg_dxgi_stub_9 @9
+    CreateDXGIFactory=odg_dxgi_stub_10 @10
+    CreateDXGIFactory1=odg_dxgi_stub_11 @11
+    CreateDXGIFactory2=odg_dxgi_stub_12 @12
+    DXGID3D10CreateDevice=odg_dxgi_stub_13 @13
+    DXGID3D10CreateLayeredDevice=odg_dxgi_stub_14 @14
+    DXGID3D10GetLayeredDeviceSize=odg_dxgi_stub_15 @15
+    DXGID3D10RegisterLayers=odg_dxgi_stub_16 @16
+    DXGIDeclareAdapterRemovalSupport=odg_dxgi_stub_17 @17
+    DXGIDisableVBlankVirtualization=odg_dxgi_stub_18 @18
+    DXGIGetDebugInterface1=odg_dxgi_stub_19 @19
+    DXGIReportAdapterConfiguration=odg_dxgi_stub_20 @20

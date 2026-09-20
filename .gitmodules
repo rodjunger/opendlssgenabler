@@ -1,0 +1,9 @@
+[submodule "third_party/minhook"]
+	path = third_party/minhook
+	url = https://github.com/TsudaKageyu/minhook.git
+[submodule "third_party/libhat"]
+	path = third_party/libhat
+	url = https://github.com/BasedInc/libhat.git
+[submodule "third_party/lz4"]
+	path = third_party/lz4
+	url = https://github.com/lz4/lz4.git
