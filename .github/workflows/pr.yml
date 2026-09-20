@@ -1,0 +1,27 @@
+# Builds and tests a pull request.
+#
+# The trigger is `pull_request`, never `pull_request_target`. A pull request
+# from a fork is untrusted code, and `pull_request` runs it with a read-only
+# token and no access to this repository's secrets, so a malicious change can
+# fail the build and nothing more. `pull_request_target` would run that same
+# code with a writable token, which is the mistake this file exists to avoid.
+name: pr
+
+on:
+  pull_request:
+    branches: [main]
+
+# Applies to every job, including the reusable workflow this calls.
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build and test
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read

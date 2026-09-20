@@ -1,0 +1,83 @@
+# Publishes a release for every commit that lands on main.
+#
+# Only a push to main can start this, which needs write access to the
+# repository, so a pull request cannot reach the job that holds the writable
+# token. The build itself is the same reusable workflow the pull request uses,
+# and runs with `contents: read`.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build and test
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-22.04
+    # The only job with a writable token, and it runs no code from the tree.
+    permissions:
+      contents: write
+    steps:
+      - name: Download the package
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: package
+          path: package
+
+      - name: Zip it
+        run: |
+          set -euo pipefail
+          if ! command -v zip >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y zip
+          fi
+          short="${GITHUB_SHA::7}"
+          name="opendlssg-fg-${short}"
+          (cd package && zip -r "../${name}.zip" .)
+          echo "ZIP=${name}.zip" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${short}" >> "$GITHUB_ENV"
+
+      - name: Create the release
+        env:
+          # Scoped to this step, and the commit subject is passed as data rather
+          # than pasted into the script, so nothing in it can run as a command.
+          GH_TOKEN: ${{ github.token }}
+          TAG: build-${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          notes=$(mktemp)
+          {
+            echo "Automated build of \`${SHORT_SHA}\` on main."
+            echo
+            echo "Copy the proxy DLL and \`opendlssg.ini\` next to the game's"
+            echo "executable. In an Unreal Engine game that is"
+            echo "\`<Game>\\Binaries\\Win64\`, beside the shipping executable,"
+            echo "not the launcher in the install folder. Start with"
+            echo "\`version.dll\`; if no \`opendlssg\\logs\` folder appears, try"
+            echo "\`winmm.dll\`, then \`dinput8.dll\`, then \`dxgi.dll\`."
+            echo
+            echo "\`tools/\` holds the offline probes, which check an NVIDIA"
+            echo "build without launching a game. See docs/TESTING.md."
+            echo
+            echo "This project enables NVIDIA's frame generation on RTX 30 in"
+            echo "games that already ship it. It does not implement frame"
+            echo "generation and contains nothing of NVIDIA's."
+          } > "$notes"
+          gh release create "$TAG" "$ZIP" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Build ${GITHUB_RUN_NUMBER} (${SHORT_SHA})" \
+            --notes-file "$notes" \
+            --prerelease

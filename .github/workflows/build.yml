@@ -1,0 +1,95 @@
+# Cross-compiles the Windows DLLs on Linux and runs the unit tests on Windows.
+# Called by pr.yml and release.yml so both use one definition of a build.
+#
+# This workflow reads code. It is never given a writable token or a secret: the
+# caller decides permissions, and both callers grant `contents: read` here.
+name: build
+
+on:
+  workflow_call:
+
+env:
+  # Pinned to one LLVM-MinGW release. The project is built and tested with this
+  # toolchain; a distribution's MinGW is a different compiler.
+  LLVM_MINGW_VERSION: 20260908
+  LLVM_MINGW_DIR: llvm-mingw-20260908-ucrt-ubuntu-22.04-x86_64
+
+jobs:
+  windows-binaries:
+    name: cross-compile
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: recursive
+          # Nothing in this workflow pushes. Leaving no credentials in
+          # .git/config keeps them out of reach of anything the build runs.
+          persist-credentials: false
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install LLVM-MinGW
+        run: |
+          set -euo pipefail
+          url="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${LLVM_MINGW_DIR}.tar.xz"
+          curl --fail --silent --show-error --location --retry 3 -o toolchain.tar.xz "$url"
+          tar -xf toolchain.tar.xz
+          echo "${GITHUB_WORKSPACE}/${LLVM_MINGW_DIR}/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw-w64.cmake \
+            -DODG_BUILD_TESTS=ON -DODG_BUILD_TOOLS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Stage the package
+        run: |
+          set -euo pipefail
+          mkdir -p package/tools
+          cp build/src/version.dll build/src/winmm.dll build/src/dinput8.dll \
+             build/src/dxgi.dll package/
+          cp assets/opendlssg.ini package/
+          cp README.md LICENSE package/
+          cp build/patchprobe.exe build/ptxprobe.exe package/tools/
+
+      - name: Stage the tests
+        run: |
+          set -euo pipefail
+          mkdir -p tests-package
+          cp build/odg_unit_tests.exe assets/opendlssg.ini tests-package/
+
+      - name: Upload the package
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: package
+          path: package/
+          if-no-files-found: error
+
+      - name: Upload the tests
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: tests
+          path: tests-package/
+          if-no-files-found: error
+
+  unit-tests:
+    name: unit tests
+    needs: windows-binaries
+    runs-on: windows-2022
+    steps:
+      # The binaries are cross-compiled and statically linked, so they run here
+      # without the repository or a toolchain.
+      - name: Download the tests
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: tests
+          path: tests
+
+      - name: Run
+        working-directory: tests
+        run: .\odg_unit_tests.exe
