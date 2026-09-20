@@ -74,7 +74,8 @@ process, and only on a GPU that needs it.
 | 2 | `nvapi64` `NvAPI_D3D12_SetRawScgPriority` | Answered with success, not executed | An Ada-only call that removes the device on older hardware |
 | 3 | `sl.dlss_g` flip-metering flag writes | Forced to the plugin's own software-pacing value | Gate 3: Ampere has no hardware flip metering |
 | 3b | `nvngx_dlssg` comparisons against the Blackwell id | Compare against Ada instead | [Multi-frame](#multi-frame-generation): 3x and above |
-| 4 | `nvapi64` `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Kernel image replaced | Gate 4, Direct3D 12 route |
+| 4 | `nvapi64` `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Kernel image replaced | Gate 4, Direct3D 12, one cubin at a time |
+| 4b | `nvapi64` `NvAPI_D3D12_CreateCuModule` | Fatbin replaced | Gate 4, Direct3D 12, runtimes from 310.7 |
 | 5 | Vulkan loader `vkGetDeviceProcAddr` | Hands out a wrapper for `vkCreateCuModuleNVX` | Gate 4, Vulkan route |
 | 6 | `kernel32` `LoadLibraryExW` | Wakes the engine's worker when a library loads; applies 3b inside the runtime's load | Timing |
 | 7 | `sl.interposer` exports | Observed and logged | Diagnostics; see [below](#diagnosing-a-problem) |

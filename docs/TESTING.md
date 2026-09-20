@@ -60,6 +60,7 @@ line saying `DLSS-G cannot run`.
 | Logs only from a launcher | `host` names a launcher, not the game; move the DLL next to the real executable (Unreal Engine: `Binaries\Win64`) |
 | No frame generation option | `sl.log` for `adapter mask 0x0` or `DLSS-G cannot run`; `hook_failed` in ours |
 | Option present, no extra frames | `kernel_substituted` missing or `kernel_refused` present |
+| `NvAPI_D3D12_CreateCuModule failed` in `sl.log`, then a crash | The runtime loads its kernels as one fatbin and the hook for it is missing or refused the module; our log should show `cu_module_intercepted` |
 | Black screen or freeze | Windows System event log, `nvlddmkm`, `Restarting TDR occurred`: a GPU hang |
 | Setting seems ignored | `config_value_rejected` |
 | No option, and `sl.log` says the OS disabled it | `hardware_scheduling` with `enabled: false`. The line is written only when hardware-accelerated GPU scheduling has been changed from the Windows default, so no line means it was never turned off |

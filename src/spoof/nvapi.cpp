@@ -23,6 +23,8 @@ enum : uint32_t {
     kInterfaceSetRawScgPriority = 0x5DB3048A,
     kInterfaceCreateCubinShaderExV2 = 0x299F5FDC,
     kInterfaceGetDriverVersion = 0x2926AAAD, // NvAPI_SYS_GetDriverAndBranchVersion
+    kInterfaceCreateCuModule = 0xAD1A677D,
+    kInterfaceCreateCuFunction = 0xE2436E22,
 };
 
 // Streamline and NGX both gate frame generation by comparing the reported
@@ -59,10 +61,24 @@ using PfnGetArchInfo = uint32_t(__cdecl*)(void* gpu, ArchInfo* info);
 using PfnGetDriverVersion = uint32_t(__cdecl*)(uint32_t* version, char branch[64]);
 using PfnSetRawScgPriority = uint32_t(__cdecl*)(void* params);
 using PfnCreateCubinShaderExV2 = uint32_t(__cdecl*)(void* params);
+// NvAPI_D3D12_CreateCuModule(ID3D12Device*, const void* blob, NvU32 size,
+// NVDX_ObjectHandle* module) and NvAPI_D3D12_CreateCuFunction(ID3D12Device*,
+// NVDX_ObjectHandle module, const char* name, NVDX_ObjectHandle* function),
+// from the NVAPI headers, where both are marked experimental and internal.
+using PfnCreateCuModule = uint32_t(__cdecl*)(void* device, const void* blob, uint32_t size,
+                                             void** out_module);
+using PfnCreateCuFunction = uint32_t(__cdecl*)(void* device, void* module, const char* name,
+                                               void** out_function);
 
 std::atomic<PfnGetArchInfo> g_get_arch_info{nullptr};
 std::atomic<PfnSetRawScgPriority> g_set_raw_scg_priority{nullptr};
 std::atomic<PfnCreateCubinShaderExV2> g_create_cubin_shader{nullptr};
+std::atomic<PfnCreateCuModule> g_create_cu_module{nullptr};
+std::atomic<PfnCreateCuFunction> g_create_cu_function{nullptr};
+std::atomic<uint32_t> g_cu_function_failures{0};
+std::atomic<bool> g_cu_module_reported{false};
+
+thread_local std::vector<uint8_t> t_module;
 
 // Idle, installing, installed. A failed attempt returns to idle so the next
 // module scan can try again.
@@ -225,6 +241,67 @@ uint32_t __cdecl HookedCreateCubinShaderExV2(void* params) {
     return status;
 }
 
+// From runtime 310.7 the Direct3D 12 route changed: instead of handing the
+// driver one cubin per kernel, the runtime loads the whole fatbin once and
+// resolves entry points from it, the same shape as Vulkan's
+// VK_NVX_binary_import. A runtime taking this path never reaches
+// CreateCubinComputeShaderExV2, so without this hook its kernels are never
+// substituted, the driver refuses a module holding no image this GPU can run,
+// and NGX fails the feature with a platform error.
+uint32_t __cdecl HookedCreateCuModule(void* device, const void* blob, uint32_t size,
+                                      void** out_module) {
+    PfnCreateCuModule original = g_create_cu_module.load(std::memory_order_acquire);
+    if (!original)
+        return kNvApiError;
+    if (!blob || !size)
+        return original(device, blob, size, out_module);
+
+    if (!g_cu_module_reported.exchange(true))
+        log::Event(log::Level::Info, "cu_module_intercepted",
+                   {log::Field::Str("route", "d3d12")});
+
+    kernels::Request request;
+    request.route = "d3d12";
+    request.caller = paths::ModuleNameForAddress(ODG_RETURN_ADDRESS());
+    switch (kernels::Decide(blob, size, request, t_module)) {
+    case kernels::Decision::Unchanged:
+        return original(device, blob, size, out_module);
+    case kernels::Decision::Refused:
+        // Nothing in the module can run here and there is no replacement. The
+        // driver would refuse it too, so refusing keeps the runtime on the same
+        // failure path rather than handing it code the GPU cannot execute.
+        return kNvApiError;
+    case kernels::Decision::Substituted:
+        break;
+    }
+
+    uint32_t status =
+        original(device, t_module.data(), static_cast<uint32_t>(t_module.size()), out_module);
+    if (status != 0 && kernels::Fallback(blob, size, status, request, t_module))
+        status =
+            original(device, t_module.data(), static_cast<uint32_t>(t_module.size()), out_module);
+    kernels::ReportDriverResult(status, "d3d12");
+    return status;
+}
+
+// A kernel the runtime cannot resolve in the substituted module is the
+// difference between frame generation running and failing, and the runtime does
+// not say which one it wanted.
+uint32_t __cdecl HookedCreateCuFunction(void* device, void* module, const char* name,
+                                        void** out_function) {
+    PfnCreateCuFunction original = g_create_cu_function.load(std::memory_order_acquire);
+    if (!original)
+        return kNvApiError;
+    const uint32_t status = original(device, module, name, out_function);
+    if (status != 0 &&
+        g_cu_function_failures.fetch_add(1, std::memory_order_relaxed) < kLoggedQueries)
+        log::Event(log::Level::Error, "cu_function_missing",
+                   {log::Field::Str("route", "d3d12"),
+                    log::Field::Str("kernel", name ? name : ""),
+                    log::Field::Uint("status", status)});
+    return status;
+}
+
 // Resolves an NVAPI entry point through the real dispatcher and hooks the
 // function itself. Substituting the pointer nvapi_QueryInterface hands out only
 // reaches callers that ask afterwards, and Streamline reads the architecture
@@ -286,6 +363,14 @@ bool Install(HMODULE nvapi) {
     HookInterface(query, kInterfaceCreateCubinShaderExV2,
                   reinterpret_cast<void*>(&HookedCreateCubinShaderExV2), g_create_cubin_shader,
                   "NvAPI_D3D12_CreateCubinComputeShaderExV2");
+    // The route a runtime from 310.7 onwards takes instead of the one above.
+    // Older drivers do not publish these, which is not a failure.
+    HookInterface(query, kInterfaceCreateCuModule,
+                  reinterpret_cast<void*>(&HookedCreateCuModule), g_create_cu_module,
+                  "NvAPI_D3D12_CreateCuModule");
+    HookInterface(query, kInterfaceCreateCuFunction,
+                  reinterpret_cast<void*>(&HookedCreateCuFunction), g_create_cu_function,
+                  "NvAPI_D3D12_CreateCuFunction");
     g_query_interface.store(query, std::memory_order_release);
     g_install_state.store(kInstalled, std::memory_order_release);
     return true;
