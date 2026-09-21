@@ -28,7 +28,7 @@ What follows from that:
 | Game | API | Result |
 |---|---|---|
 | PRAGMATA | Direct3D 12 | 2x to 4x work |
-| DOOM The Dark Ages | Vulkan | 2x to 4x work |
+| DOOM The Dark Ages | Vulkan | 2x to 6x work |
 | Indiana Jones and the Great Circle | Vulkan | 2x and 3x work |
 | Jurassic World Evolution 3 | Direct3D 12 | 2x to 4x work |
 | Corsair Cove | Direct3D 12 | 2x and 3x work |
@@ -59,6 +59,11 @@ load `version.dll`. Remove it and try `winmm.dll`, then `dinput8.dll`, then
 
 Hardware-accelerated GPU scheduling must be on (Windows Settings, System,
 Display, Graphics). Streamline refuses frame generation without it.
+
+*DLSS Override* in the NVIDIA app, and `DLSS-FG - Enable DLSS Override` in
+NVIDIA Profile Inspector, make NGX run a frame-generation runtime of its own in
+place of the one a game ships. The engine treats that runtime the same as any
+other and needs nothing set here.
 
 ## How it works
 
