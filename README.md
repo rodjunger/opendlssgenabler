@@ -22,7 +22,7 @@ What follows from that:
   a generated frame looks.
 
 > **Status: early development.** Frame generation works on an RTX 3080 in the
-> eight games tested so far, up to 4x where the game supports multi-frame
+> nine games tested so far, up to 4x where the game supports multi-frame
 > generation. Expect games that do not work yet; reports help.
 
 | Game | API | Result |
@@ -33,6 +33,7 @@ What follows from that:
 | Jurassic World Evolution 3 | Direct3D 12 | 2x to 4x work |
 | Corsair Cove | Direct3D 12 | 2x and 3x work |
 | Frostpunk 2 | Direct3D 12 | 2x to 4x work |
+| Crimson Desert | Direct3D 12 | 2x to 4x work |
 | Far Far West | Direct3D 12 | 2x works; 4x with `ForceMultiplier` |
 | Halo Campaign Evolved | Direct3D 12 | 2x works; 4x with `ForceMultiplier` |
 

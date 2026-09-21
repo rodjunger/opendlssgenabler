@@ -61,6 +61,7 @@ line saying `DLSS-G cannot run`.
 | No frame generation option | `sl.log` for `adapter mask 0x0` or `DLSS-G cannot run`; `hook_failed` in ours |
 | Option present, no extra frames | `kernel_substituted` missing or `kernel_refused` present |
 | `NvAPI_D3D12_CreateCuModule failed` in `sl.log`, then a crash | The runtime loads its kernels as one fatbin and the hook for it is missing or refused the module; our log should show `cu_module_intercepted` |
+| Frame generation on, nothing generated, no refusal | `cu_function_missing` names a kernel the runtime asked for and could not find in the substituted module |
 | Black screen or freeze | Windows System event log, `nvlddmkm`, `Restarting TDR occurred`: a GPU hang |
 | Setting seems ignored | `config_value_rejected` |
 | No option, and `sl.log` says the OS disabled it | `hardware_scheduling` with `enabled: false`. The line is written only when hardware-accelerated GPU scheduling has been changed from the Windows default, so no line means it was never turned off |
@@ -90,19 +91,20 @@ version nobody has reported on yet; say whether it worked.
 
 `[Runtime] Mode=Bundled` loads a runtime of your choosing in place of the one a
 game ships, without changing anything on disk. It is how 310.9.1 was verified
-here, and worth trying when a game's own runtime is old: 310.9.1 in PRAGMATA
-generates frames at 2x, 3x and 4x and removes the ghosting that build showed
-with path tracing and Ray Reconstruction.
+here, in PRAGMATA and in Crimson Desert, and it is worth trying for its own
+sake: on 310.9.1 PRAGMATA generates frames at 2x, 3x and 4x and the ghosting it
+showed with path tracing and Ray Reconstruction is gone.
 
 ## Tested so far
 
 | Game | API | Runtime | GPU | Result |
 |---|---|---|---|---|
-| PRAGMATA | Direct3D 12 | 310.3.0 | RTX 3080 | 2x works, also with ReShade and REFramework installed; 4x works, smooth |
+| PRAGMATA | Direct3D 12 | 310.3.0 | RTX 3080 | 2x works, also with ReShade and REFramework installed; 4x works, smooth. Also verified at 310.9.1 through `[Runtime] Mode=Bundled`: 2x, 3x and 4x, and the ghosting this game showed with path tracing and Ray Reconstruction is gone on that runtime |
 | DOOM The Dark Ages | Vulkan | 310.6.0 | RTX 3080 | 2x works, 90 to 130 fps; 3x and 4x work |
 | Far Far West | Direct3D 12 | 310.6.0 | RTX 3080 | 2x works; its menu only switches generation on and off, so 4x needs `ForceMultiplier=4`, confirmed at `presented: 4` |
 | Halo Campaign Evolved | Direct3D 12 | 310.2.1 | RTX 3080 | 2x works; its menu only switches generation on and off, so 4x needs `ForceMultiplier=4`, confirmed at `presented: 4`. Streamline runs plugins NGX downloaded, not the ones the game ships |
 | Jurassic World Evolution 3 | Direct3D 12 | 310.3.0 | RTX 3080 | Its menu offers the multipliers; 2x, 3x and 4x confirmed at `presented` 2, 3 and 4 |
 | Indiana Jones and the Great Circle | Vulkan | 310.2.1 | RTX 3080 | Its menu offers the multipliers; 2x, 3x and 4x work with path tracing on, `presented: 3` captured and every other request accepted. Streamline runs a plugin NGX downloaded. The game asks for `numFramesToGenerate` 0 when switching modes, which Streamline rejects on its own; that is the game's call, passed through untouched |
 | Frostpunk 2 | Direct3D 12 | 310.5.2 | RTX 3080 | Its menu offers the multipliers; 2x, 3x and 4x confirmed at `presented` 2, 3 and 4. A cutscene played at 3x showed artefacts, with `sl.log` reporting 34 `Frame rate over 100.00ms, reseting frame timer` warnings in that minute: the game's own frames were arriving more than 100 ms apart, which is what generation had to interpolate across |
+| Crimson Desert | Direct3D 12 | 310.9.1 | RTX 3080 | 310.9.1 loaded through `[Runtime] Mode=Bundled`. 2x, 3x and 4x confirmed at `presented` 2, 3 and 4, with Ray Reconstruction on. Its menu also offers the multipliers above 4x, which were not tried: Streamline 2.11.1 and the runtime both allow 5 generated frames, and nothing in the log caps the count |
 | Corsair Cove | Direct3D 12 | 310.5.2 | RTX 3080 | Its menu offers the multipliers; 2x and 3x confirmed at `presented` 2 and 3. 4x was accepted but the run ended before a state read showed it. Streamline 2.10.3, running plugins NGX downloaded |
