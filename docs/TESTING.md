@@ -38,7 +38,7 @@ In order, the engine's log contains:
 | `kernel_target_resolved` with `sm: 86` | The architecture kernels are supplied for |
 | `dlssg_set_options` with `mode: on` | The game switched frame generation on |
 | `kernel_substituted` with `method` `native` or `retarget` | Kernels were supplied; with multi-frame, retargets show `from_sm: 120` |
-| `dlssg_state` with `presented` of 2, 3 or 4 | The multiplier actually on screen |
+| `dlssg_state` with `presented` above 1 | The multiplier actually on screen, up to 6 where the game and its plugin allow it |
 | `kernels_summary` with `refused: 0` | The totals, written once the count settles |
 
 Most of that table is written at `Level=2`. `Level=1`, the default, keeps the
@@ -106,5 +106,5 @@ showed with path tracing and Ray Reconstruction is gone.
 | Jurassic World Evolution 3 | Direct3D 12 | 310.3.0 | RTX 3080 | Its menu offers the multipliers; 2x, 3x and 4x confirmed at `presented` 2, 3 and 4 |
 | Indiana Jones and the Great Circle | Vulkan | 310.2.1 | RTX 3080 | Its menu offers the multipliers; 2x, 3x and 4x work with path tracing on, `presented: 3` captured and every other request accepted. Streamline runs a plugin NGX downloaded. The game asks for `numFramesToGenerate` 0 when switching modes, which Streamline rejects on its own; that is the game's call, passed through untouched |
 | Frostpunk 2 | Direct3D 12 | 310.5.2 | RTX 3080 | Its menu offers the multipliers; 2x, 3x and 4x confirmed at `presented` 2, 3 and 4. A cutscene played at 3x showed artefacts, with `sl.log` reporting 34 `Frame rate over 100.00ms, reseting frame timer` warnings in that minute: the game's own frames were arriving more than 100 ms apart, which is what generation had to interpolate across |
-| Crimson Desert | Direct3D 12 | 310.9.1 | RTX 3080 | 310.9.1 loaded through `[Runtime] Mode=Bundled`. 2x, 3x and 4x confirmed at `presented` 2, 3 and 4, with Ray Reconstruction on. Its menu also offers the multipliers above 4x, which were not tried: Streamline 2.11.1 and the runtime both allow 5 generated frames, and nothing in the log caps the count |
+| Crimson Desert | Direct3D 12 | 310.9.1 | RTX 3080 | 310.9.1 loaded through `[Runtime] Mode=Bundled`. Every multiplier its menu offers works, with Ray Reconstruction on: `presented` 2, 3, 4, 5 and 6, the last from `numFramesToGenerate=5`. Streamline 2.11.1 and the runtime both allow 5 generated frames, and nothing in the chain caps it below that, which no other game tested here reaches |
 | Corsair Cove | Direct3D 12 | 310.5.2 | RTX 3080 | Its menu offers the multipliers; 2x and 3x confirmed at `presented` 2 and 3. 4x was accepted but the run ended before a state read showed it. Streamline 2.10.3, running plugins NGX downloaded |

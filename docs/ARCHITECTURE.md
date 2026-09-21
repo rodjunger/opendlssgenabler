@@ -347,8 +347,10 @@ lea  rdx, "DLSSG.MultiFrameCountMax"
 
 `MultiFrame=1` rewrites these comparisons to Ada's id, the architecture the
 runtime has been told, as it is loaded and before any of its code runs. The
-plugin's startup line then reports `NGX feature supports 3` (310.3) and a game
-that supports multi-frame generation offers 3x and 4x. RTX40MFG-Unlock and
+plugin's startup line then reports `NGX feature supports 3` (310.3), or 5 from
+310.6 onwards, and a game that supports multi-frame generation offers the
+multipliers its own plugin allows: 4x with a plugin capped at 3 generated
+frames, 6x with one that allows 5, which Crimson Desert reaches. RTX40MFG-Unlock and
 mfg-unlock make the same change on RTX 40 cards.
 
 **Which comparisons are gates.** Not every comparison against that id is one,
