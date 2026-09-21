@@ -48,6 +48,84 @@ std::optional<Instruction> Decode(const std::byte* address) {
     return Instruction{address, decoded.len};
 }
 
+namespace {
+
+// The low nibble of a Jcc, SETcc or CMOVcc opcode, as the Intel manual's `tttn`.
+constexpr uint8_t kConditionBelow = 0x2, kConditionAboveOrEqual = 0x3;
+constexpr uint8_t kConditionEqual = 0x4, kConditionNotEqual = 0x5;
+constexpr uint8_t kConditionBelowOrEqual = 0x6, kConditionAbove = 0x7;
+constexpr uint8_t kConditionLess = 0xC, kConditionGreaterOrEqual = 0xD;
+constexpr uint8_t kConditionLessOrEqual = 0xE, kConditionGreater = 0xF;
+
+Condition FromConditionCode(uint8_t code) {
+    switch (code) {
+    case kConditionBelow:
+    case kConditionAboveOrEqual:
+    case kConditionBelowOrEqual:
+    case kConditionAbove:
+    case kConditionLess:
+    case kConditionGreaterOrEqual:
+    case kConditionLessOrEqual:
+    case kConditionGreater: return Condition::Ordering;
+    case kConditionEqual:
+    case kConditionNotEqual: return Condition::Equality;
+    default: return Condition::Other;
+    }
+}
+
+// Opcodes that write the flags, which ends a comparison's reach.
+bool WritesFlags(const hde64s& decoded) {
+    if (decoded.opcode == 0x0F)
+        return false;
+    // cmp, test, add, sub, and, or, xor in their common forms, and the
+    // immediate groups 0x80 to 0x83.
+    switch (decoded.opcode & 0xFC) {
+    case 0x00: case 0x08: case 0x10: case 0x18:
+    case 0x20: case 0x28: case 0x30: case 0x38: return true;
+    default: break;
+    }
+    switch (decoded.opcode) {
+    case 0x80: case 0x81: case 0x83: case 0x84: case 0x85:
+    case 0x3C: case 0x3D: case 0xA8: case 0xA9: return true;
+    default: return false;
+    }
+}
+
+} // namespace
+
+Condition ConditionTested(const Instruction& instruction) {
+    hde64s decoded{};
+    if (!Decoded(instruction.address, decoded))
+        return Condition::NotConditional;
+    // Jcc rel8.
+    if (decoded.opcode >= 0x70 && decoded.opcode <= 0x7F)
+        return FromConditionCode(decoded.opcode & 0x0F);
+    if (decoded.opcode != 0x0F)
+        return Condition::NotConditional;
+    // Jcc rel32, SETcc and CMOVcc share the low nibble as the condition.
+    const uint8_t second = decoded.opcode2;
+    if ((second >= 0x80 && second <= 0x8F) || (second >= 0x90 && second <= 0x9F) ||
+        (second >= 0x40 && second <= 0x4F))
+        return FromConditionCode(second & 0x0F);
+    return Condition::NotConditional;
+}
+
+std::optional<Instruction> FirstFlagConsumer(const std::byte* start, int limit) {
+    const std::byte* cursor = start;
+    for (int i = 0; i < limit; ++i) {
+        const auto instruction = Decode(cursor);
+        if (!instruction)
+            return std::nullopt;
+        if (ConditionTested(*instruction) != Condition::NotConditional)
+            return instruction;
+        hde64s decoded{};
+        if (!Decoded(cursor, decoded) || WritesFlags(decoded))
+            return std::nullopt;
+        cursor = instruction->Next();
+    }
+    return std::nullopt;
+}
+
 std::optional<ByteStore> AsByteStore(const Instruction& instruction) {
     hde64s decoded{};
     if (!Decoded(instruction.address, decoded))

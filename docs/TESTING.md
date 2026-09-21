@@ -65,7 +65,7 @@ line saying `DLSS-G cannot run`.
 | Setting seems ignored | `config_value_rejected` |
 | No option, and `sl.log` says the OS disabled it | `hardware_scheduling` with `enabled: false`. The line is written only when hardware-accelerated GPU scheduling has been changed from the Windows default, so no line means it was never turned off |
 | Vulkan game, no extra frames | `vulkan_hooks_unavailable`: the Vulkan loader was loaded but could not be hooked |
-| No 3x or 4x option | `multi_frame_gates_not_found`, or the game does not support multi-frame; `sl.log` states `NGX feature supports N` |
+| No 3x or 4x option | `multi_frame_gates_not_found` names how many comparisons were found and how many were read as an ordering test; or the game's own plugin caps it, which `sl.log` states as `SL Plugin supports N` |
 | `kernel_fallback` | The driver rejected a Blackwell kernel; 3x and above may be wrong, 2x is kept |
 | No option in a game from before 2024 | Its Streamline is 1.x, which this engine does not reach: `hook_export_missing` for `slGetFeatureFunction`, and `patchprobe` finds no patch sites. A runtime from `[Runtime] Mode=Bundled` loads and indexes, but the plugin still refuses |
 
@@ -85,6 +85,14 @@ and follows no such rule: read it before attaching it.
 When reporting, include the game, its store version, the GPU, the driver version,
 and both log files. A `provider_untested` line means the game ships a runtime
 version nobody has reported on yet; say whether it worked.
+
+## A newer runtime in an older game
+
+`[Runtime] Mode=Bundled` loads a runtime of your choosing in place of the one a
+game ships, without changing anything on disk. It is how 310.9.1 was verified
+here, and worth trying when a game's own runtime is old: 310.9.1 in PRAGMATA
+generates frames at 2x, 3x and 4x and removes the ghosting that build showed
+with path tracing and Ray Reconstruction.
 
 ## Tested so far
 

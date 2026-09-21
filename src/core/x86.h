@@ -31,6 +31,29 @@ std::optional<ByteStore> AsByteStore(const Instruction& instruction);
 // a `lea` loads. Empty for an instruction without one.
 std::optional<const std::byte*> RipRelativeOperand(const Instruction& instruction);
 
+// What a conditional instruction asks of the flags: Jcc, SETcc and CMOVcc are
+// all classified the same way.
+//
+// This is how an architecture gate is told apart from an unrelated comparison.
+// A gate gives a feature to every architecture at or above some id, so its
+// result is read with an ordering test. Rewriting the id it compares against
+// keeps that meaning. An equality test asks whether the architecture is one
+// exact id, and rewriting the value it is compared with would change the
+// question rather than answer it differently, so such a comparison is left
+// alone.
+enum class Condition {
+    NotConditional,
+    Ordering, // below, above, less, greater, and their negations
+    Equality, // equal, not equal
+    Other,    // sign, overflow, parity
+};
+Condition ConditionTested(const Instruction& instruction);
+
+// The first instruction after `start` that reads the flags, within `limit`
+// instructions. Empty when a flag-writing instruction comes first, since the
+// comparison's result is dead by then, or when nothing conditional is found.
+std::optional<Instruction> FirstFlagConsumer(const std::byte* start, int limit);
+
 // The destination of an unconditional jump: `jmp rel32`, or `jmp [rip + rel32]`
 // through a pointer. Empty for anything else, or when the pointer cannot be
 // read.

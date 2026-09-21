@@ -459,6 +459,49 @@ void TestLogPruning() {
     CHECK(CountLogs(directory) == 10);
 }
 
+void TestConditions() {
+    using odg::x86::Condition;
+    using odg::x86::ConditionTested;
+    auto at = [](const unsigned char* bytes) {
+        return *odg::x86::Decode(reinterpret_cast<const std::byte*>(bytes));
+    };
+    // An architecture floor is read with an ordering test, whatever form the
+    // compiler picked for it.
+    const unsigned char jl_short[] = {0x7C, 0x05};
+    const unsigned char jl_near[] = {0x0F, 0x8C, 0x05, 0x00, 0x00, 0x00};
+    const unsigned char setae[] = {0x0F, 0x93, 0xC0};
+    const unsigned char cmovl[] = {0x0F, 0x4C, 0xC8};
+    CHECK(ConditionTested(at(jl_short)) == Condition::Ordering);
+    CHECK(ConditionTested(at(jl_near)) == Condition::Ordering);
+    CHECK(ConditionTested(at(setae)) == Condition::Ordering);
+    CHECK(ConditionTested(at(cmovl)) == Condition::Ordering);
+    // Equality asks a different question and must never be rewritten.
+    const unsigned char je[] = {0x74, 0x05};
+    const unsigned char sete[] = {0x0F, 0x94, 0xC0};
+    const unsigned char jne_near[] = {0x0F, 0x85, 0x05, 0x00, 0x00, 0x00};
+    CHECK(ConditionTested(at(je)) == Condition::Equality);
+    CHECK(ConditionTested(at(sete)) == Condition::Equality);
+    CHECK(ConditionTested(at(jne_near)) == Condition::Equality);
+    // Neither, and not conditional at all.
+    const unsigned char jo[] = {0x70, 0x05};
+    const unsigned char nop[] = {0x90};
+    CHECK(ConditionTested(at(jo)) == Condition::Other);
+    CHECK(ConditionTested(at(nop)) == Condition::NotConditional);
+
+    // cmp eax, 0x1B0 ; setae al
+    const unsigned char gate[] = {0x3D, 0xB0, 0x01, 0x00, 0x00, 0x0F, 0x93, 0xC0};
+    const auto* code = reinterpret_cast<const std::byte*>(gate);
+    const auto consumer = odg::x86::FirstFlagConsumer(code + 5, 8);
+    CHECK(consumer.has_value());
+    CHECK(consumer && ConditionTested(*consumer) == Condition::Ordering);
+    // A second comparison overwrites the flags, so the first one's result is
+    // dead and the later test belongs to something else.
+    const unsigned char overwritten[] = {0x3D, 0xB0, 0x01, 0x00, 0x00,
+                                         0x83, 0xC0, 0x01, 0x7C, 0x02};
+    const auto* dead = reinterpret_cast<const std::byte*>(overwritten);
+    CHECK(!odg::x86::FirstFlagConsumer(dead + 5, 8).has_value());
+}
+
 void TestLogLevels() {
     using odg::log::Level;
     using odg::log::LevelFromSetting;
@@ -551,6 +594,7 @@ int main() {
     TestComponentName();
     TestPathRedaction();
     TestLogLevels();
+    TestConditions();
     TestLogPruning();
     std::printf("%d checks, %d failed\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

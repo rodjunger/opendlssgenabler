@@ -12,12 +12,13 @@ namespace {
 // Runtimes verified in a game: 310.2.1 in Halo Campaign Evolved, 310.3 in
 // PRAGMATA and Jurassic World Evolution 3, 310.5.2 in Corsair Cove, all
 // Direct3D 12, and 310.6 in DOOM The Dark Ages (Vulkan). Matched on
-// major.minor.build.
+// major.minor.build. 310.9.1 was verified through [Runtime] Mode=Bundled rather
+// than as a runtime a game ships.
 struct Tested {
     uint16_t major, minor, build;
 };
-constexpr std::array<Tested, 4> kTested{
-    {{310, 2, 1}, {310, 3, 0}, {310, 5, 2}, {310, 6, 0}}};
+constexpr std::array<Tested, 5> kTested{
+    {{310, 2, 1}, {310, 3, 0}, {310, 5, 2}, {310, 6, 0}, {310, 9, 1}}};
 
 // The version-info APIs are resolved from the System32 copy of version.dll at
 // runtime rather than imported. A static import would be a self-reference when

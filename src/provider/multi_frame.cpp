@@ -28,6 +28,10 @@ constexpr size_t kMaxGates = 4;
 constexpr std::string_view kParameterPrefix = "DLSSG.";
 constexpr std::string_view kMultiFrameParameter = "DLSSG.MultiFrameCountMax";
 constexpr size_t kMaxParameterLength = 64;
+// How far past a comparison to look for the instruction that reads its result.
+// The consumer follows within a couple of instructions in every build checked.
+constexpr int kInstructionsToConsumer = 8;
+
 // How far past a comparison its result is published. The builds checked load
 // the parameter name within four instructions of the comparison.
 constexpr int kInstructionsToPublication = 8;
@@ -83,6 +87,15 @@ std::string PublishedParameter(std::span<const std::byte> image, const std::byte
     return {};
 }
 
+const char* ConditionName(x86::Condition condition) {
+    switch (condition) {
+    case x86::Condition::Ordering: return "ordering";
+    case x86::Condition::Equality: return "equality";
+    case x86::Condition::Other: return "other";
+    default: return "none";
+    }
+}
+
 } // namespace
 
 std::vector<Gate> FindMultiFrameGates(HMODULE provider) {
@@ -99,10 +112,17 @@ std::vector<Gate> FindMultiFrameGates(HMODULE provider) {
             const auto compare = x86::Decode(match.get());
             if (!compare || compare->length != encoding.immediate + sizeof(uint32_t))
                 continue;
+            const auto consumer = x86::FirstFlagConsumer(compare->Next(), kInstructionsToConsumer);
+            const x86::Condition condition =
+                consumer ? x86::ConditionTested(*consumer) : x86::Condition::NotConditional;
             Gate gate;
             gate.immediate = match.get() + encoding.immediate;
             gate.publishes = PublishedParameter(image, compare->Next());
-            gate.unlock = gate.publishes.empty() || gate.publishes == kMultiFrameParameter;
+            gate.condition = ConditionName(condition);
+            // An ordering test is what an architecture floor is read with, and
+            // a parameter of its own marks a capability that is not this one.
+            gate.unlock = condition == x86::Condition::Ordering &&
+                          (gate.publishes.empty() || gate.publishes == kMultiFrameParameter);
             gates.push_back(std::move(gate));
         }
     }
@@ -123,13 +143,10 @@ void UnlockMultiFrame(HMODULE provider, bool at_load) {
     const auto gates = FindMultiFrameGates(provider);
     const auto unlocked = std::count_if(gates.begin(), gates.end(),
                                         [](const Gate& gate) { return gate.unlock; });
-    const bool advertised = std::any_of(gates.begin(), gates.end(), [](const Gate& gate) {
-        return gate.publishes == kMultiFrameParameter;
-    });
-    if (!advertised || gates.size() > kMaxGates) {
+    if (unlocked == 0 || gates.size() > kMaxGates) {
         log::Event(log::Level::Warning, "multi_frame_gates_not_found",
                    {log::Field::Uint("matches", gates.size()),
-                    log::Field::Bool("count_gate_found", advertised),
+                    log::Field::Uint("ordering_gates", static_cast<size_t>(unlocked)),
                     log::Field::Str("note", "this runtime stays at 2x")});
         return;
     }
@@ -139,7 +156,8 @@ void UnlockMultiFrame(HMODULE provider, bool at_load) {
     for (const Gate& gate : gates) {
         if (!gate.unlock) {
             log::Event(log::Level::Info, "multi_frame_gate_left",
-                       {log::Field::Str("publishes", gate.publishes)});
+                       {log::Field::Str("publishes", gate.publishes),
+                        log::Field::Str("condition", gate.condition)});
             continue;
         }
         patched += pe::PatchCode(gate.immediate, &reported, sizeof(reported)) ? 1 : 0;
