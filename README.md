@@ -46,7 +46,9 @@ What follows from that:
 ## Installing
 
 1. Close the game.
-2. [Build](docs/BUILD.md) the DLL. Prebuilt releases will follow.
+2. Download the latest release, or [build](docs/BUILD.md) it yourself. A
+   release is named `<version>-<commit>` and carries the four proxy DLLs, the
+   settings file, the offline tools and this documentation.
 3. Copy `version.dll` and `opendlssg.ini` next to the game's executable. If a
    `version.dll` is already there, back it up first. In an Unreal Engine game
    that is `<Game>\Binaries\Win64`, beside `<Game>-Win64-Shipping.exe`, not the

@@ -7,6 +7,10 @@ name: build
 
 on:
   workflow_call:
+    outputs:
+      version:
+        description: The project version, read from CMakeLists.txt.
+        value: ${{ jobs.windows-binaries.outputs.version }}
 
 env:
   # Pinned to one LLVM-MinGW release. The project is built and tested with this
@@ -18,6 +22,8 @@ jobs:
   windows-binaries:
     name: cross-compile
     runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Check out
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -26,6 +32,17 @@ jobs:
           # Nothing in this workflow pushes. Leaving no credentials in
           # .git/config keeps them out of reach of anything the build runs.
           persist-credentials: false
+
+      - name: Read the version
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^[[:space:]]*VERSION[[:space:]]\{1,\}\([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\)[[:space:]]*$/\1/p' CMakeLists.txt | head -1)
+          if [ -z "$version" ]; then
+            echo "CMakeLists.txt has no project VERSION to release under" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
@@ -54,7 +71,8 @@ jobs:
           cp build/src/version.dll build/src/winmm.dll build/src/dinput8.dll \
              build/src/dxgi.dll package/
           cp assets/opendlssg.ini package/
-          cp README.md LICENSE package/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md package/
+          cp -r docs package/
           cp build/patchprobe.exe build/ptxprobe.exe package/tools/
 
       - name: Stage the tests
