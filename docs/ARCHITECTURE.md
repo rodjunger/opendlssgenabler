@@ -351,6 +351,27 @@ plugin's startup line then reports `NGX feature supports 3` (310.3) and a game
 that supports multi-frame generation offers 3x and 4x. RTX40MFG-Unlock and
 mfg-unlock make the same change on RTX 40 cards.
 
+**Which comparisons are gates.** Not every comparison against that id is one,
+and the shape of a gate is not stable: 310.6 compiles it to `cmovl` where 310.7
+uses `jl`, so a byte pattern finds one site and misses the other. What does hold
+is the meaning. A gate gives the feature to every architecture at or above an
+id, so the instruction that reads it is an ordering test: `jl`, `jb`, `setae`,
+`cmovl`. A comparison read for equality is asking whether the GPU is one exact
+architecture, and moving the id would change that question rather than answer it
+differently, so it is refused. The reader is always the instruction directly
+after the comparison, where no other instruction can have changed the flags.
+
+Two further rules keep an unknown build safe. A comparison whose result is
+published as some other `DLSSG.` parameter belongs to another capability and is
+left alone, logged as `multi_frame_gate_left` naming the parameter, which is how
+`DLSSG.ReflexWarp.Available` survives in 310.3. And if
+a build yields more than four comparisons, or none read as an ordering, nothing
+is rewritten and `multi_frame_gates_not_found` says so. Runtimes from 310.7 put
+a driver-profile clamp between the comparison and the publication, which is why
+the parameter name is no longer what identifies a gate.
+
+This rule is mfg-unlock's, from its analysis of 310.6 through 310.8.
+
 The same id gates other Blackwell capabilities, so not every comparison is
 rewritten. A comparison whose result is published as a `DLSSG.` parameter other
 than `DLSSG.MultiFrameCountMax` is left alone; in 310.3 that keeps
@@ -429,7 +450,8 @@ Warnings are expected in healthy runs on newer plugins and are not failures.
 | Were kernels supplied? | `kernel_substituted` with `method: native` or `retarget` |
 | Were kernels supplied at all? | `kernels_summary`, written once the count settles |
 | Is the OS in the way? | `hardware_scheduling` with `enabled: false` |
-| Which driver was this? | `driver` |
+| Which driver was this? | `driver`, or `driver_version_unavailable` when NVAPI would not answer |
+| Why is a hook missing? | `hook_export_missing`, or `nvapi_interface_absent` when the installed driver does not publish that entry point, which an older driver legitimately may not |
 | Did anything fail? | `hook_failed`, `kernel_refused`, `kernel_driver_rejected`, `runtime_redirect_missing` |
 
 **Streamline's reasoning.** Streamline states why it accepts or refuses a feature

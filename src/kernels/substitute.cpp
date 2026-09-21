@@ -358,7 +358,7 @@ Decision Apply(void* params, const void* return_address) {
         return Decision::Unchanged;
 
     Request request;
-    request.route = "d3d12";
+    request.route = kRouteD3D12;
     request.caller = paths::ModuleNameForAddress(return_address);
     request.kernel = ReadName(params, fields);
     const Decision decision = Decide(data, size, request, t_buffer);

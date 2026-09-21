@@ -49,8 +49,12 @@ uint32_t TargetSm();
 enum class Decision { Unchanged, Substituted, Refused };
 
 // Who asked, for the log.
+// How a kernel reached the driver, named once so the hooks and the log agree.
+inline constexpr const char* kRouteD3D12 = "d3d12";
+inline constexpr const char* kRouteVulkan = "vulkan";
+
 struct Request {
-    const char* route = "";  // "d3d12" or "vulkan"
+    const char* route = ""; // kRouteD3D12 or kRouteVulkan
     std::string caller;      // module that made the call
     std::string kernel;      // entry point, when the route names it
 };

@@ -48,6 +48,10 @@ constexpr uint32_t kNvApiError = 0xFFFFFFFF;
 // caller that polls.
 constexpr uint32_t kLoggedQueries = 32;
 
+// Enough unresolved kernels to show which ones a substituted module is missing,
+// without a line per frame once it is clear the module is wrong.
+constexpr uint32_t kLoggedFunctionFailures = 16;
+
 struct ArchInfo {
     uint32_t version;
     uint32_t architecture;
@@ -237,7 +241,7 @@ uint32_t __cdecl HookedCreateCubinShaderExV2(void* params) {
     if (status != 0 && kernels::ApplyFallback(params, status))
         status = original(params);
     kernels::Revert(params);
-    kernels::ReportDriverResult(status, "d3d12");
+    kernels::ReportDriverResult(status, kernels::kRouteD3D12);
     return status;
 }
 
@@ -258,10 +262,10 @@ uint32_t __cdecl HookedCreateCuModule(void* device, const void* blob, uint32_t s
 
     if (!g_cu_module_reported.exchange(true))
         log::Event(log::Level::Info, "cu_module_intercepted",
-                   {log::Field::Str("route", "d3d12")});
+                   {log::Field::Str("route", kernels::kRouteD3D12)});
 
     kernels::Request request;
-    request.route = "d3d12";
+    request.route = kernels::kRouteD3D12;
     request.caller = paths::ModuleNameForAddress(ODG_RETURN_ADDRESS());
     switch (kernels::Decide(blob, size, request, t_module)) {
     case kernels::Decision::Unchanged:
@@ -275,12 +279,16 @@ uint32_t __cdecl HookedCreateCuModule(void* device, const void* blob, uint32_t s
         break;
     }
 
-    uint32_t status =
-        original(device, t_module.data(), static_cast<uint32_t>(t_module.size()), out_module);
+    const auto create = [&] {
+        return original(device, t_module.data(), static_cast<uint32_t>(t_module.size()),
+                        out_module);
+    };
+    uint32_t status = create();
+    // A driver that refuses the first choice may accept one built from a
+    // nearer architecture, which is the same second chance the other routes get.
     if (status != 0 && kernels::Fallback(blob, size, status, request, t_module))
-        status =
-            original(device, t_module.data(), static_cast<uint32_t>(t_module.size()), out_module);
-    kernels::ReportDriverResult(status, "d3d12");
+        status = create();
+    kernels::ReportDriverResult(status, kernels::kRouteD3D12);
     return status;
 }
 
@@ -294,9 +302,9 @@ uint32_t __cdecl HookedCreateCuFunction(void* device, void* module, const char* 
         return kNvApiError;
     const uint32_t status = original(device, module, name, out_function);
     if (status != 0 &&
-        g_cu_function_failures.fetch_add(1, std::memory_order_relaxed) < kLoggedQueries)
+        g_cu_function_failures.fetch_add(1, std::memory_order_relaxed) < kLoggedFunctionFailures)
         log::Event(log::Level::Error, "cu_function_missing",
-                   {log::Field::Str("route", "d3d12"),
+                   {log::Field::Str("route", kernels::kRouteD3D12),
                     log::Field::Str("kernel", name ? name : ""),
                     log::Field::Uint("status", status)});
     return status;

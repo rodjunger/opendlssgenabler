@@ -48,7 +48,8 @@ void ReportRuntime(HMODULE runtime) {
     for (const auto& gate : gates)
         std::printf("    %s rva 0x%zx  read as %-8s  publishes %s\n",
                     gate.unlock ? "unlock" : "leave ", Rva(gate.immediate, runtime),
-                    gate.condition, gate.publishes.empty() ? "-" : gate.publishes.c_str());
+                    odg::x86::ConditionName(gate.condition),
+                    gate.publishes.empty() ? "-" : gate.publishes.c_str());
 }
 
 int Probe(const char* path) {

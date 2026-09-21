@@ -28,10 +28,6 @@ constexpr size_t kMaxGates = 4;
 constexpr std::string_view kParameterPrefix = "DLSSG.";
 constexpr std::string_view kMultiFrameParameter = "DLSSG.MultiFrameCountMax";
 constexpr size_t kMaxParameterLength = 64;
-// How far past a comparison to look for the instruction that reads its result.
-// The consumer follows within a couple of instructions in every build checked.
-constexpr int kInstructionsToConsumer = 8;
-
 // How far past a comparison its result is published. The builds checked load
 // the parameter name within four instructions of the comparison.
 constexpr int kInstructionsToPublication = 8;
@@ -87,15 +83,6 @@ std::string PublishedParameter(std::span<const std::byte> image, const std::byte
     return {};
 }
 
-const char* ConditionName(x86::Condition condition) {
-    switch (condition) {
-    case x86::Condition::Ordering: return "ordering";
-    case x86::Condition::Equality: return "equality";
-    case x86::Condition::Other: return "other";
-    default: return "none";
-    }
-}
-
 } // namespace
 
 std::vector<Gate> FindMultiFrameGates(HMODULE provider) {
@@ -112,16 +99,19 @@ std::vector<Gate> FindMultiFrameGates(HMODULE provider) {
             const auto compare = x86::Decode(match.get());
             if (!compare || compare->length != encoding.immediate + sizeof(uint32_t))
                 continue;
-            const auto consumer = x86::FirstFlagConsumer(compare->Next(), kInstructionsToConsumer);
-            const x86::Condition condition =
-                consumer ? x86::ConditionTested(*consumer) : x86::Condition::NotConditional;
+            // The instruction directly after a comparison is the one that reads
+            // its flags: nothing can have come in between to change them. Every
+            // gate in every build checked is written that way, so a reader
+            // further off is left alone rather than guessed at.
+            const auto consumer = x86::Decode(compare->Next());
             Gate gate;
             gate.immediate = match.get() + encoding.immediate;
+            gate.condition =
+                consumer ? x86::ConditionTested(*consumer) : x86::Condition::NotConditional;
             gate.publishes = PublishedParameter(image, compare->Next());
-            gate.condition = ConditionName(condition);
             // An ordering test is what an architecture floor is read with, and
             // a parameter of its own marks a capability that is not this one.
-            gate.unlock = condition == x86::Condition::Ordering &&
+            gate.unlock = gate.condition == x86::Condition::Ordering &&
                           (gate.publishes.empty() || gate.publishes == kMultiFrameParameter);
             gates.push_back(std::move(gate));
         }
@@ -157,7 +147,7 @@ void UnlockMultiFrame(HMODULE provider, bool at_load) {
         if (!gate.unlock) {
             log::Event(log::Level::Info, "multi_frame_gate_left",
                        {log::Field::Str("publishes", gate.publishes),
-                        log::Field::Str("condition", gate.condition)});
+                        log::Field::Str("condition", x86::ConditionName(gate.condition))});
             continue;
         }
         patched += pe::PatchCode(gate.immediate, &reported, sizeof(reported)) ? 1 : 0;

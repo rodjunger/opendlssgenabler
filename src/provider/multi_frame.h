@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/x86.h"
+
 #include <windows.h>
 
 #include <cstddef>
@@ -36,7 +38,7 @@ namespace odg::provider {
 struct Gate {
     const std::byte* immediate = nullptr; // the imm32 compared against
     std::string publishes;                // DLSSG parameter it feeds, if found
-    const char* condition = "";           // how its result is read
+    x86::Condition condition = x86::Condition::NotConditional; // how its result is read
     bool unlock = false;                  // whether it is rewritten
 };
 

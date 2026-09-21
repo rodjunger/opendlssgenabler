@@ -50,12 +50,24 @@ std::optional<Instruction> Decode(const std::byte* address) {
 
 namespace {
 
-// The low nibble of a Jcc, SETcc or CMOVcc opcode, as the Intel manual's `tttn`.
+// Jcc, SETcc and CMOVcc all encode their condition in the low nibble of the
+// opcode, as the Intel manual's `tttn`. Only the orderings and the two equality
+// codes are named; the rest test sign, overflow or parity.
 constexpr uint8_t kConditionBelow = 0x2, kConditionAboveOrEqual = 0x3;
 constexpr uint8_t kConditionEqual = 0x4, kConditionNotEqual = 0x5;
 constexpr uint8_t kConditionBelowOrEqual = 0x6, kConditionAbove = 0x7;
 constexpr uint8_t kConditionLess = 0xC, kConditionGreaterOrEqual = 0xD;
 constexpr uint8_t kConditionLessOrEqual = 0xE, kConditionGreater = 0xF;
+
+// The opcodes that carry a condition. `jcc rel8` is one byte; the others are
+// two, behind the 0x0F escape.
+constexpr uint8_t kJccRel8First = 0x70, kJccRel8Last = 0x7F;
+constexpr uint8_t kTwoByteEscape = 0x0F;
+constexpr uint8_t kCmovccFirst = 0x40, kCmovccLast = 0x4F;
+constexpr uint8_t kJccRel32First = 0x80, kJccRel32Last = 0x8F;
+constexpr uint8_t kSetccFirst = 0x90, kSetccLast = 0x9F;
+
+constexpr uint8_t kConditionMask = 0x0F;
 
 Condition FromConditionCode(uint8_t code) {
     switch (code) {
@@ -73,22 +85,8 @@ Condition FromConditionCode(uint8_t code) {
     }
 }
 
-// Opcodes that write the flags, which ends a comparison's reach.
-bool WritesFlags(const hde64s& decoded) {
-    if (decoded.opcode == 0x0F)
-        return false;
-    // cmp, test, add, sub, and, or, xor in their common forms, and the
-    // immediate groups 0x80 to 0x83.
-    switch (decoded.opcode & 0xFC) {
-    case 0x00: case 0x08: case 0x10: case 0x18:
-    case 0x20: case 0x28: case 0x30: case 0x38: return true;
-    default: break;
-    }
-    switch (decoded.opcode) {
-    case 0x80: case 0x81: case 0x83: case 0x84: case 0x85:
-    case 0x3C: case 0x3D: case 0xA8: case 0xA9: return true;
-    default: return false;
-    }
+bool Within(uint8_t value, uint8_t first, uint8_t last) {
+    return value >= first && value <= last;
 }
 
 } // namespace
@@ -97,33 +95,24 @@ Condition ConditionTested(const Instruction& instruction) {
     hde64s decoded{};
     if (!Decoded(instruction.address, decoded))
         return Condition::NotConditional;
-    // Jcc rel8.
-    if (decoded.opcode >= 0x70 && decoded.opcode <= 0x7F)
-        return FromConditionCode(decoded.opcode & 0x0F);
-    if (decoded.opcode != 0x0F)
+    if (Within(decoded.opcode, kJccRel8First, kJccRel8Last))
+        return FromConditionCode(decoded.opcode & kConditionMask);
+    if (decoded.opcode != kTwoByteEscape)
         return Condition::NotConditional;
-    // Jcc rel32, SETcc and CMOVcc share the low nibble as the condition.
-    const uint8_t second = decoded.opcode2;
-    if ((second >= 0x80 && second <= 0x8F) || (second >= 0x90 && second <= 0x9F) ||
-        (second >= 0x40 && second <= 0x4F))
-        return FromConditionCode(second & 0x0F);
+    if (Within(decoded.opcode2, kCmovccFirst, kCmovccLast) ||
+        Within(decoded.opcode2, kJccRel32First, kJccRel32Last) ||
+        Within(decoded.opcode2, kSetccFirst, kSetccLast))
+        return FromConditionCode(decoded.opcode2 & kConditionMask);
     return Condition::NotConditional;
 }
 
-std::optional<Instruction> FirstFlagConsumer(const std::byte* start, int limit) {
-    const std::byte* cursor = start;
-    for (int i = 0; i < limit; ++i) {
-        const auto instruction = Decode(cursor);
-        if (!instruction)
-            return std::nullopt;
-        if (ConditionTested(*instruction) != Condition::NotConditional)
-            return instruction;
-        hde64s decoded{};
-        if (!Decoded(cursor, decoded) || WritesFlags(decoded))
-            return std::nullopt;
-        cursor = instruction->Next();
+const char* ConditionName(Condition condition) {
+    switch (condition) {
+    case Condition::Ordering: return "ordering";
+    case Condition::Equality: return "equality";
+    case Condition::Other: return "other";
+    default: return "none";
     }
-    return std::nullopt;
 }
 
 std::optional<ByteStore> AsByteStore(const Instruction& instruction) {

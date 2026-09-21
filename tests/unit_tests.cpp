@@ -488,18 +488,13 @@ void TestConditions() {
     CHECK(ConditionTested(at(jo)) == Condition::Other);
     CHECK(ConditionTested(at(nop)) == Condition::NotConditional);
 
-    // cmp eax, 0x1B0 ; setae al
+    // A gate as the runtime compiles it: cmp eax, 0x1B0 ; setae al. The reader
+    // is the next instruction, which is what the gate finder decodes.
     const unsigned char gate[] = {0x3D, 0xB0, 0x01, 0x00, 0x00, 0x0F, 0x93, 0xC0};
-    const auto* code = reinterpret_cast<const std::byte*>(gate);
-    const auto consumer = odg::x86::FirstFlagConsumer(code + 5, 8);
-    CHECK(consumer.has_value());
-    CHECK(consumer && ConditionTested(*consumer) == Condition::Ordering);
-    // A second comparison overwrites the flags, so the first one's result is
-    // dead and the later test belongs to something else.
-    const unsigned char overwritten[] = {0x3D, 0xB0, 0x01, 0x00, 0x00,
-                                         0x83, 0xC0, 0x01, 0x7C, 0x02};
-    const auto* dead = reinterpret_cast<const std::byte*>(overwritten);
-    CHECK(!odg::x86::FirstFlagConsumer(dead + 5, 8).has_value());
+    const auto compare = odg::x86::Decode(reinterpret_cast<const std::byte*>(gate));
+    CHECK(compare.has_value());
+    CHECK(compare && compare->length == 5);
+    CHECK(compare && ConditionTested(*odg::x86::Decode(compare->Next())) == Condition::Ordering);
 }
 
 void TestLogLevels() {

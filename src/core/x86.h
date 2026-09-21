@@ -49,10 +49,8 @@ enum class Condition {
 };
 Condition ConditionTested(const Instruction& instruction);
 
-// The first instruction after `start` that reads the flags, within `limit`
-// instructions. Empty when a flag-writing instruction comes first, since the
-// comparison's result is dead by then, or when nothing conditional is found.
-std::optional<Instruction> FirstFlagConsumer(const std::byte* start, int limit);
+// The condition's name, for a log line or a report.
+const char* ConditionName(Condition condition);
 
 // The destination of an unconditional jump: `jmp rel32`, or `jmp [rip + rel32]`
 // through a pointer. Empty for anything else, or when the pointer cannot be

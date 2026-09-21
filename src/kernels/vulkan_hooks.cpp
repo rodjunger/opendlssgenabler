@@ -67,7 +67,7 @@ int32_t __stdcall HookedCreateCuModule(void* device, const CuModuleCreateInfo* i
         return original(device, info, allocator, out_module);
 
     Request request;
-    request.route = "vulkan";
+    request.route = kRouteVulkan;
     request.caller = paths::ModuleNameForAddress(ODG_RETURN_ADDRESS());
     switch (Decide(info->data, info->data_size, request, t_buffer)) {
     case Decision::Unchanged:
@@ -89,7 +89,7 @@ int32_t __stdcall HookedCreateCuModule(void* device, const CuModuleCreateInfo* i
         substituted.data_size = t_buffer.size();
         status = original(device, &substituted, allocator, out_module);
     }
-    ReportDriverResult(static_cast<uint32_t>(status), "vulkan");
+    ReportDriverResult(static_cast<uint32_t>(status), kRouteVulkan);
     return status;
 }
 
