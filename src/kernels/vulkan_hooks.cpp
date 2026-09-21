@@ -68,7 +68,9 @@ int32_t __stdcall HookedCreateCuModule(void* device, const CuModuleCreateInfo* i
 
     Request request;
     request.route = kRouteVulkan;
-    request.caller = paths::ModuleNameForAddress(ODG_RETURN_ADDRESS());
+    const void* caller = ODG_RETURN_ADDRESS();
+    request.module = paths::ModuleForAddress(caller);
+    request.caller = paths::ModuleNameForAddress(caller);
     switch (Decide(info->data, info->data_size, request, t_buffer)) {
     case Decision::Unchanged:
         return original(device, info, allocator, out_module);

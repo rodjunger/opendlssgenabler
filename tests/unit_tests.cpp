@@ -14,6 +14,7 @@
 #include "kernels/cubin_params.h"
 #include "kernels/device.h"
 #include "kernels/fatbin.h"
+#include "kernels/provider_index.h"
 #include "kernels/substitute.h"
 
 #include <lz4.h>
@@ -553,6 +554,11 @@ void TestComponentName() {
           L"sl.dlss_g.dll");
     CHECK(ComponentFileName(store + L"dlssg\\versions\\1\\files\\170_E658703.bin") ==
           L"nvngx_dlssg.dll");
+    // The runtime a driver profile with the DLSS override enabled makes NGX
+    // load. It is the frame-generation runtime and nothing in its file name
+    // says so, which is how the loader has to recognise it.
+    CHECK(ComponentFileName(store + L"dlssg\\versions\\20318464\\files\\160_E658700.bin") ==
+          L"nvngx_dlssg.dll");
     // Case is NGX's to choose, and it varies within one path.
     CHECK(ComponentFileName(L"c:\\programdata\\nvidia\\NGX\\Models\\SL_Common_0\\v\\170_E.dll") ==
           L"sl.common.dll");
@@ -565,6 +571,39 @@ void TestComponentName() {
     CHECK(ComponentFileName(L"").empty());
     // The engine's own module is a component of nothing.
     CHECK(ComponentFileName(L"C:\\Game\\version.dll") == L"version.dll");
+}
+
+// The rule the Crimson Desert hang came from: a kernel is never answered from a
+// runtime that was not indexed, and a runtime that was never indexed answers
+// nothing. Building an index needs a mapped NVIDIA runtime, so what is checked
+// here is the guard in front of it, which is what failed.
+void TestProviderLookupGuard() {
+    using odg::kernels::FindContainerForCubin;
+    using odg::kernels::FindNativeCubin;
+    using odg::kernels::ProviderIndexed;
+    using odg::kernels::SoleIndexedProvider;
+
+    // This process has indexed nothing, so nothing identifies as indexed and
+    // there is no sole runtime to fall back to.
+    CHECK(!ProviderIndexed(nullptr));
+    CHECK(!ProviderIndexed(GetModuleHandleW(nullptr)));
+    CHECK(SoleIndexedProvider() == nullptr);
+
+    // A lookup against an unindexed runtime, or none at all, answers nothing
+    // rather than reaching for another runtime's images.
+    const uint8_t blob[64] = {0x7F, 'E', 'L', 'F'};
+    size_t size = 1;
+    CHECK(FindNativeCubin(nullptr, blob, sizeof(blob), 86, size) == nullptr);
+    CHECK(size == 0);
+    size = 1;
+    CHECK(FindNativeCubin(GetModuleHandleW(nullptr), blob, sizeof(blob), 86, size) == nullptr);
+    CHECK(size == 0);
+    size = 1;
+    CHECK(FindContainerForCubin(nullptr, blob, sizeof(blob), size) == nullptr);
+    CHECK(size == 0);
+    size = 1;
+    CHECK(FindContainerForCubin(GetModuleHandleW(nullptr), blob, sizeof(blob), size) == nullptr);
+    CHECK(size == 0);
 }
 
 void TestText() {
@@ -587,6 +626,7 @@ int main() {
     TestCubinParams();
     TestText();
     TestComponentName();
+    TestProviderLookupGuard();
     TestPathRedaction();
     TestLogLevels();
     TestConditions();

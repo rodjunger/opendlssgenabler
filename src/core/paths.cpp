@@ -125,15 +125,27 @@ std::vector<HMODULE> LoadedComponents(const wchar_t* module_name) {
     return found;
 }
 
-std::string ModuleNameForAddress(const void* address) {
-    if (!address)
-        return {};
+bool PinModule(HMODULE module) {
+    HMODULE pinned = nullptr;
+    return module &&
+           GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                  GET_MODULE_HANDLE_EX_FLAG_PIN,
+                              reinterpret_cast<LPCWSTR>(module), &pinned) != 0;
+}
+
+HMODULE ModuleForAddress(const void* address) {
     HMODULE module = nullptr;
-    if (!GetModuleHandleExW(
+    if (!address ||
+        !GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
             static_cast<LPCWSTR>(address), &module))
-        return {};
-    return text::ToUtf8(ModuleFileName(module));
+        return nullptr;
+    return module;
+}
+
+std::string ModuleNameForAddress(const void* address) {
+    HMODULE module = ModuleForAddress(address);
+    return module ? text::ToUtf8(ModuleFileName(module)) : std::string{};
 }
 
 } // namespace odg::paths

@@ -266,7 +266,9 @@ uint32_t __cdecl HookedCreateCuModule(void* device, const void* blob, uint32_t s
 
     kernels::Request request;
     request.route = kernels::kRouteD3D12;
-    request.caller = paths::ModuleNameForAddress(ODG_RETURN_ADDRESS());
+    const void* caller = ODG_RETURN_ADDRESS();
+    request.module = paths::ModuleForAddress(caller);
+    request.caller = paths::ModuleNameForAddress(caller);
     switch (kernels::Decide(blob, size, request, t_module)) {
     case kernels::Decision::Unchanged:
         return original(device, blob, size, out_module);

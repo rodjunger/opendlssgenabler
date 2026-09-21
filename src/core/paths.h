@@ -10,6 +10,18 @@ namespace odg::paths {
 std::wstring ModulePath(HMODULE module);
 std::wstring ModuleFileName(HMODULE module);
 
+// Module a code address belongs to, without changing its reference count.
+// Null when the address is in no loaded module.
+HMODULE ModuleForAddress(const void* address);
+
+// Keeps `module` mapped for the life of the process. NGX loads a runtime,
+// reads what it needs and unloads it again, so a handle this engine keeps, or a
+// pointer into the image behind it, is otherwise only valid until it does.
+// False when the pin was refused, which leaves both of those unsafe to hold.
+// It takes the loader lock, so it is never called with a lock of this engine's
+// held.
+bool PinModule(HMODULE module);
+
 // File name of the module a code address belongs to, in UTF-8, for logging and
 // for deciding which component made a call. Empty when the address is in no
 // loaded module.

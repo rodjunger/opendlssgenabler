@@ -171,7 +171,10 @@ the copy a game ships. In Halo Campaign Evolved the downloaded `sl.common` was
 the only one that ran, so matching on file names alone left the caller that
 computes the adapter mask unscoped, it read Ampere, and every DLSS-G plugin was
 disabled before the game could offer the option. `paths::ComponentFileName` maps
-such a path back to the module the component ships as.
+such a path back to the module the component ships as. The same rule finds the
+frame-generation runtime itself, which NGX stores under that scheme with a
+`.bin` extension; looking for the file name `nvngx_dlssg.dll` misses it, and
+then neither its multi-frame gates nor its kernels are handled.
 
 Scoping is not a refinement. In PRAGMATA with path tracing on, telling every
 caller Ada removed the device before the main menu (`DXGI_ERROR_DEVICE_REMOVED`),
@@ -307,11 +310,32 @@ Nothing is shipped or stored. Both kinds of replacement come from the runtime th
 game already has, so a runtime version this project has never seen is handled the
 same way as a known one.
 
+**Each runtime answers only for itself.** More than one DLSS-G runtime can be
+mapped at once. A driver profile with *DLSS Override* enabled, which the NVIDIA
+app and NVIDIA Profile Inspector both set, makes NGX load a runtime of its own
+from `%ProgramData%\NVIDIA\NGX\models\dlssg\versions\<build>\files`, named
+`<architecture>_<application id>.bin`, and use it instead of the one the game
+ships. So the engine indexes every runtime it sees and answers a kernel from the
+build that created it, never from another one. The native images of two builds
+are not interchangeable even when the kernels look the same: in Crimson Desert,
+answering a 310.9.0 runtime's kernels from a 310.9.1 index had the driver refuse
+all 25 of them with `NVAPI_INVALID_IMAGE`, and Streamline's `sl.dlssg` worker
+then timed out and took the game with it. An unindexed runtime is refused rather
+than answered wrongly, which `kernel_refused` states as `this runtime was not
+indexed`.
+
+A runtime is pinned as soon as it is found, before anything reads it. The index
+points into the mapped image and the gate scan reads the code section directly,
+while NGX unloads a runtime it has replaced; without the pin, either read can
+land on an image that is no longer there. A runtime that cannot be pinned is not
+indexed at all.
+
 ### Two routes to the driver
 
 | API | Entry point | How it is reached |
 |---|---|---|
 | Direct3D 12 | `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Inline hook on the function |
+| Direct3D 12, from 310.7 | `NvAPI_D3D12_CreateCuModule` | Inline hook on the function |
 | Vulkan | `vkCreateCuModuleNVX` (`VK_NVX_binary_import`) | Wrapper returned by `vkGetDeviceProcAddr` |
 
 The NVAPI parameter block is versioned and not public. The engine finds the image
@@ -449,12 +473,36 @@ Warnings are expected in healthy runs on newer plugins and are not failures.
 | Is this GPU enabled? | `gpu_architecture` with `supported: true` |
 | Did the spoof land in time? | `arch_spoof_applied`, then Streamline's `adapter mask 0x1` |
 | Is frame generation on? | `dlssg_set_options` with `mode: on`, `dlssg_state` with `presented: 2` |
+| Which runtime is in play? | The `caller` of `kernel_substituted`. `provider_found` is written once per runtime mapped, and more than one is normal |
 | Were kernels supplied? | `kernel_substituted` with `method: native` or `retarget` |
 | Were kernels supplied at all? | `kernels_summary`, written once the count settles |
 | Is the OS in the way? | `hardware_scheduling` with `enabled: false` |
 | Which driver was this? | `driver`, or `driver_version_unavailable` when NVAPI would not answer |
 | Why is a hook missing? | `hook_export_missing`, or `nvapi_interface_absent` when the installed driver does not publish that entry point, which an older driver legitimately may not |
 | Did anything fail? | `hook_failed`, `kernel_refused`, `kernel_driver_rejected`, `runtime_redirect_missing` |
+
+**More than one runtime.** A process can map several DLSS-G runtimes: the one the
+game ships, one NGX downloaded for a driver profile with the DLSS override
+enabled, and the driver's own fallback copy. Each gets its own `provider_found`,
+`multi_frame_unlocked` and `provider_index_built`, named by path. The one
+generating frames is the one named as the `caller` of `kernel_substituted`; the
+others are read and put aside, so a `multi_frame_gates_not_found` against one of
+them is not a failure of the run.
+
+Two refusals say the opposite, and they are different problems.
+`this runtime was not indexed` means kernels arrived from a runtime the loader
+never found, and `caller` names it. `the calling module could not be identified`
+means the return address belonged to no module at all, which happens when
+another tool has hooked the same entry point and calls through a trampoline of
+its own. That one is only ever refused while several runtimes are indexed: with
+one there is nothing to confuse it with, so it is answered from that one, which
+is what a single-runtime process did before any of this existed. No tool tested
+against so far interposes on these entry points, so this is a guard rather than
+a path anything is known to take.
+
+`provider_pin_failed` means a runtime was found and then could not be kept
+mapped, so it was left alone rather than indexed from an image that may be
+unmapped underneath it.
 
 **Streamline's reasoning.** Streamline states why it accepts or refuses a feature
 in its own log and nowhere else. A production interposer ignores its JSON
