@@ -1,5 +1,7 @@
 #pragma once
 
+#include <windows.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -55,7 +57,9 @@ inline constexpr const char* kRouteVulkan = "vulkan";
 
 struct Request {
     const char* route = ""; // kRouteD3D12 or kRouteVulkan
-    std::string caller;      // module that made the call
+    HMODULE module = nullptr; // runtime that made the call, and whose own images
+                              // are the only ones it can be answered from
+    std::string caller;      // its file name, for the log
     std::string kernel;      // entry point, when the route names it
 };
 

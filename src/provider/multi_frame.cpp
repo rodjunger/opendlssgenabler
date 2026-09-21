@@ -1,6 +1,7 @@
 #include "provider/multi_frame.h"
 
 #include "core/log.h"
+#include "core/paths.h"
 #include "core/pe.h"
 #include "core/signature.h"
 #include "core/x86.h"
@@ -12,9 +13,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace odg::provider {
 namespace {
@@ -33,7 +36,22 @@ constexpr size_t kMaxParameterLength = 64;
 constexpr int kInstructionsToPublication = 8;
 
 std::atomic<bool> g_enabled{true};
-std::atomic<bool> g_done{false};
+
+// Patched once per runtime rather than once per process: a game's own runtime
+// and one NGX downloaded in its place can both be mapped, and the gates have to
+// be moved in whichever of them creates the feature.
+std::mutex g_unlocked_mutex;
+std::vector<HMODULE> g_unlocked;
+
+// Returns false when this runtime has already been claimed, so its gates are
+// read and rewritten once however many times it is offered.
+bool ClaimUnlock(HMODULE provider) {
+    std::lock_guard lock(g_unlocked_mutex);
+    if (std::find(g_unlocked.begin(), g_unlocked.end(), provider) != g_unlocked.end())
+        return false;
+    g_unlocked.push_back(provider);
+    return true;
+}
 
 // `cmp r32, imm32` against Blackwell's id, in its two encodings:
 //   3D id          cmp eax, imm32
@@ -128,16 +146,17 @@ bool MultiFrameEnabled() {
 }
 
 void UnlockMultiFrame(HMODULE provider, bool at_load) {
-    if (!provider || !MultiFrameEnabled() || g_done.exchange(true))
+    if (!provider || !MultiFrameEnabled() || !ClaimUnlock(provider))
         return;
     const auto gates = FindMultiFrameGates(provider);
     const auto unlocked = std::count_if(gates.begin(), gates.end(),
                                         [](const Gate& gate) { return gate.unlock; });
     if (unlocked == 0 || gates.size() > kMaxGates) {
         log::Event(log::Level::Warning, "multi_frame_gates_not_found",
-                   {log::Field::Uint("matches", gates.size()),
+                   {log::Field::Path("provider", paths::ModulePath(provider).c_str()),
+                    log::Field::Uint("matches", gates.size()),
                     log::Field::Uint("ordering_gates", static_cast<size_t>(unlocked)),
-                    log::Field::Str("note", "this runtime stays at 2x")});
+                    log::Field::Str("note", "no multi-frame gate found in this runtime")});
         return;
     }
 
@@ -154,7 +173,8 @@ void UnlockMultiFrame(HMODULE provider, bool at_load) {
     }
     log::Event(patched == static_cast<size_t>(unlocked) ? log::Level::Info : log::Level::Warning,
                "multi_frame_unlocked",
-               {log::Field::Uint("gates", static_cast<size_t>(unlocked)),
+               {log::Field::Path("provider", paths::ModulePath(provider).c_str()),
+                log::Field::Uint("gates", static_cast<size_t>(unlocked)),
                 log::Field::Uint("patched", patched), log::Field::Bool("at_load", at_load)});
 }
 

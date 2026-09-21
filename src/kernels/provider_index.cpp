@@ -1,6 +1,7 @@
 #include "kernels/provider_index.h"
 
 #include "core/log.h"
+#include "core/paths.h"
 #include "core/pe.h"
 #include "kernels/cubin.h"
 #include "kernels/fatbin.h"
@@ -8,7 +9,6 @@
 #include <libhat/scanner.hpp>
 
 #include <algorithm>
-#include <atomic>
 #include <cctype>
 #include <span>
 #include <map>
@@ -51,10 +51,15 @@ struct Identity {
     size_t size = 0;
 };
 
-std::unordered_map<uint64_t, Blob> g_containers;                   // cubin -> its fatbin
-std::unordered_map<uint64_t, std::map<uint32_t, Blob>> g_variants; // kernel -> arch -> cubin
+// One runtime's images. Several runtimes can be mapped at once, and a kernel is
+// only ever answered from the one that created it.
+struct Index {
+    std::unordered_map<uint64_t, Blob> containers;                   // cubin -> its fatbin
+    std::unordered_map<uint64_t, std::map<uint32_t, Blob>> variants; // kernel -> arch -> cubin
+};
+
+std::unordered_map<HMODULE, Index> g_indexes;
 std::mutex g_mutex;
-std::atomic<bool> g_built{false};
 
 uint64_t Hash(std::span<const uint8_t> bytes, uint64_t hash = kFnvBasis) {
     for (const uint8_t byte : bytes) {
@@ -123,12 +128,34 @@ void ForEachMatch(HMODULE provider, const Signature& magic, Visit&& visit) {
     }
 }
 
+// Runtimes whose walk is under way. Claiming one before the walk, rather than
+// registering it after, keeps two threads from both walking the same image and
+// one of them throwing the other's result away.
+std::vector<HMODULE> g_building;
+
+bool ClaimIndex(HMODULE provider) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_indexes.count(provider) != 0 ||
+        std::find(g_building.begin(), g_building.end(), provider) != g_building.end())
+        return false;
+    g_building.push_back(provider);
+    return true;
+}
+
+void ReleaseClaim(HMODULE provider) {
+    g_building.erase(std::remove(g_building.begin(), g_building.end(), provider),
+                     g_building.end());
+}
+
 } // namespace
 
 void BuildProviderIndex(HMODULE provider) {
-    bool expected = false;
-    if (!provider || !g_built.compare_exchange_strong(expected, true))
+    if (!provider || !ClaimIndex(provider))
         return;
+    // The index is pointers into the runtime's mapped image, and NGX unloads a
+    // runtime it has replaced. The caller pins before it hands the module over;
+    // this is the second belt, because everything below stores raw pointers.
+    paths::PinModule(provider);
 
     std::vector<Blob> containers;
     std::unordered_map<uint64_t, Blob> contained;
@@ -171,24 +198,41 @@ void BuildProviderIndex(HMODULE provider) {
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        g_containers = std::move(contained);
-        g_variants = std::move(variants);
+        Index& index = g_indexes[provider];
+        index.containers = std::move(contained);
+        index.variants = std::move(variants);
+        ReleaseClaim(provider);
     }
     log::Event(log::Level::Info, "provider_index_built",
-               {log::Field::Uint("containers", containers.size()),
+               {log::Field::Path("provider", paths::ModulePath(provider).c_str()),
+                log::Field::Uint("containers", containers.size()),
                 log::Field::Uint("cubins", cubins),
                 log::Field::Uint("kernels_with_alternatives", paired)});
 }
 
-const void* FindNativeCubin(const void* cubin, size_t size, uint32_t arch, size_t& out_size) {
+bool ProviderIndexed(HMODULE provider) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_indexes.count(provider) != 0;
+}
+
+HMODULE SoleIndexedProvider() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_indexes.size() == 1 ? g_indexes.begin()->first : nullptr;
+}
+
+const void* FindNativeCubin(HMODULE provider, const void* cubin, size_t size, uint32_t arch,
+                            size_t& out_size) {
     out_size = 0;
     Identity identity;
-    if (!cubin || !Identify(static_cast<const uint8_t*>(cubin), size, identity))
+    if (!provider || !cubin || !Identify(static_cast<const uint8_t*>(cubin), size, identity))
         return nullptr;
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    const auto entry = g_variants.find(VariantKey(identity.name, identity.code));
-    if (entry == g_variants.end())
+    const auto indexed = g_indexes.find(provider);
+    if (indexed == g_indexes.end())
+        return nullptr;
+    const auto entry = indexed->second.variants.find(VariantKey(identity.name, identity.code));
+    if (entry == indexed->second.variants.end())
         return nullptr;
     const auto image = entry->second.find(arch);
     if (image == entry->second.end())
@@ -197,15 +241,19 @@ const void* FindNativeCubin(const void* cubin, size_t size, uint32_t arch, size_
     return image->second.data;
 }
 
-const void* FindContainerForCubin(const void* cubin, size_t size, size_t& container_size) {
+const void* FindContainerForCubin(HMODULE provider, const void* cubin, size_t size,
+                                  size_t& container_size) {
     container_size = 0;
-    if (!cubin || !size)
+    if (!provider || !cubin || !size)
         return nullptr;
     const uint64_t key = Fingerprint(static_cast<const uint8_t*>(cubin), size);
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    const auto found = g_containers.find(key);
-    if (found == g_containers.end())
+    const auto indexed = g_indexes.find(provider);
+    if (indexed == g_indexes.end())
+        return nullptr;
+    const auto found = indexed->second.containers.find(key);
+    if (found == indexed->second.containers.end())
         return nullptr;
     container_size = found->second.size;
     return found->second.data;

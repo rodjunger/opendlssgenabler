@@ -28,7 +28,7 @@ What follows from that:
 | Game | API | Result |
 |---|---|---|
 | PRAGMATA | Direct3D 12 | 2x to 4x work |
-| DOOM The Dark Ages | Vulkan | 2x to 4x work |
+| DOOM The Dark Ages | Vulkan | 2x to 6x work |
 | Indiana Jones and the Great Circle | Vulkan | 2x and 3x work |
 | Jurassic World Evolution 3 | Direct3D 12 | 2x to 4x work |
 | Corsair Cove | Direct3D 12 | 2x and 3x work |
@@ -46,11 +46,16 @@ What follows from that:
 ## Installing
 
 1. Close the game.
-2. [Build](docs/BUILD.md) the DLL. Prebuilt releases will follow.
+2. Download the latest release, or [build](docs/BUILD.md) it yourself. A
+   release is named `<version>-<commit>` and carries the four proxy DLLs, the
+   settings file, the offline tools and this documentation.
 3. Copy `version.dll` and `opendlssg.ini` next to the game's executable. If a
    `version.dll` is already there, back it up first. In an Unreal Engine game
    that is `<Game>\Binaries\Win64`, beside `<Game>-Win64-Shipping.exe`, not the
-   launcher in the install folder.
+   launcher in the install folder. Ship `opendlssg.ini` as it comes; its
+   defaults are the ones to run, and
+   [docs/CONFIGURATION.md](docs/CONFIGURATION.md) covers the few cases that
+   need an edit.
 4. Start the game and enable DLSS Frame Generation in its graphics settings.
 
 If no `opendlssg\logs` folder appears next to the executable, the game does not
@@ -59,6 +64,11 @@ load `version.dll`. Remove it and try `winmm.dll`, then `dinput8.dll`, then
 
 Hardware-accelerated GPU scheduling must be on (Windows Settings, System,
 Display, Graphics). Streamline refuses frame generation without it.
+
+*DLSS Override* in the NVIDIA app, and `DLSS-FG - Enable DLSS Override` in
+NVIDIA Profile Inspector, make NGX run a frame-generation runtime of its own in
+place of the one a game ships. The engine treats that runtime the same as any
+other and needs nothing set here.
 
 ## How it works
 
@@ -87,11 +97,12 @@ the engine makes and where, and how to read the logs.
 Set `Level=3` under `[Logging]` and `StreamlineDiagnostics=1` under `[Debug]` in
 `opendlssg.ini`, reproduce the problem, and attach the files from
 `opendlssg\logs`. [docs/TESTING.md](docs/TESTING.md) lists what a healthy run looks
-like.
+like, and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) explains every setting.
 
 ## Documentation
 
 - [How it works](docs/ARCHITECTURE.md)
+- [Configuration](docs/CONFIGURATION.md)
 - [Building](docs/BUILD.md)
 - [Testing a game](docs/TESTING.md)
 

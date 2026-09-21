@@ -14,8 +14,11 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <string>
+#include <vector>
 
 namespace odg::app::loader {
 namespace {
@@ -42,8 +45,12 @@ using PfnLoadLibraryExW = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
 
 std::atomic<PfnLoadLibraryExW> g_load_library_ex_w{nullptr};
 std::atomic<bool> g_vulkan_hooks{false};
-std::atomic<bool> g_provider_done{false};
-std::atomic<HMODULE> g_runtime{nullptr};
+// Every DLSS-G runtime this process has mapped, in the order they arrived.
+// A driver profile with the DLSS override enabled makes NGX load a runtime of
+// its own beside the one the game ships, and the kernels come from whichever it
+// picked, so both are prepared and both are indexed.
+std::mutex g_runtimes_mutex;
+std::vector<HMODULE> g_runtimes;
 std::atomic<int> g_nvapi_attempts{0};
 HANDLE g_wake = nullptr;
 
@@ -51,12 +58,58 @@ std::wstring g_redirect_path;
 std::atomic<bool> g_redirect_reported{false};
 thread_local bool t_in_redirect = false;
 
+// NGX stores the runtime it downloads as <architecture>_<application id>.bin in
+// its model directory, so a load is recognised by the component the path names,
+// not by the file name it carries.
 bool NamesRuntime(LPCWSTR file_name) {
-    return file_name && paths::FileNameEqualsInsensitive(file_name, kRuntimeName);
+    // ComponentFileName canonicalises only the NGX store's names; every other
+    // path keeps the case its caller wrote, and Windows file names do not care.
+    return file_name && paths::FileNameEqualsInsensitive(paths::ComponentFileName(file_name),
+                                                        kRuntimeName);
 }
 
-// Experimental: loads the configured runtime in place of the game's
-// nvngx_dlssg.dll. The thread guard stops that load from recursing back here.
+// Records a runtime and returns false when it was already known, so each is
+// prepared once. NGX unloads a runtime once it has read what it wanted from it,
+// and this handle is kept and re-examined on every rescan, so it is pinned
+// first. Pinning before the lock is taken, rather than under it, keeps this
+// engine's lock off the path to the loader lock: PinModule takes the loader
+// lock, and this function itself runs under it, inside the LoadLibraryExW hook.
+bool Known(HMODULE module) {
+    std::lock_guard lock(g_runtimes_mutex);
+    return std::find(g_runtimes.begin(), g_runtimes.end(), module) != g_runtimes.end();
+}
+
+bool RecordRuntime(HMODULE module) {
+    if (!module || Known(module))
+        return false;
+    // Pinned outside the lock, because PinModule takes the loader lock and this
+    // function itself runs under it, inside the LoadLibraryExW hook. Holding
+    // this engine's lock across that acquisition would invert the two.
+    if (!paths::PinModule(module)) {
+        // The handle was stale, or the loader refused. Either way the image
+        // cannot be relied on to stay mapped, so it is left alone rather than
+        // read and indexed. A module that has already gone is not enumerated
+        // again, so this is reported at most once for it.
+        log::Event(log::Level::Warning, "provider_pin_failed",
+                   {log::Field::Str("note", "runtime not indexed; it may already be unloaded")});
+        return false;
+    }
+    std::lock_guard lock(g_runtimes_mutex);
+    if (std::find(g_runtimes.begin(), g_runtimes.end(), module) != g_runtimes.end())
+        return false;
+    g_runtimes.push_back(module);
+    return true;
+}
+
+std::vector<HMODULE> KnownRuntimes() {
+    std::lock_guard lock(g_runtimes_mutex);
+    return g_runtimes;
+}
+
+// Experimental: loads the configured runtime in place of whichever one is being
+// asked for, the game's or the one NGX downloaded for a driver profile with the
+// DLSS override enabled. The thread guard stops that load from recursing back
+// here.
 HMODULE MaybeRedirect(LPCWSTR file_name) {
     if (g_redirect_path.empty() || t_in_redirect || !NamesRuntime(file_name))
         return nullptr;
@@ -73,21 +126,7 @@ HMODULE MaybeRedirect(LPCWSTR file_name) {
     return module;
 }
 
-// Called on every module scan once the provider is mapped. Indexing happens
-// before the runtime creates any kernel, and resolving the target here keeps
-// the cost of initializing CUDA off the game's render thread.
-void InspectProvider() {
-    if (g_provider_done.load(std::memory_order_acquire))
-        return;
-    // A redirected runtime is loaded under its own file name, so the handle
-    // recorded at load time is checked as well as the usual name.
-    HMODULE module = g_runtime.load(std::memory_order_acquire);
-    if (!module)
-        module = GetModuleHandleW(kRuntimeName);
-    if (!module || !provider::IsDlssgProvider(module))
-        return;
-    g_provider_done.store(true, std::memory_order_release);
-
+void ReportProvider(HMODULE module) {
     const std::wstring path = paths::ModulePath(module);
     provider::Version version;
     provider::ReadVersion(path.c_str(), version);
@@ -99,11 +138,38 @@ void InspectProvider() {
         log::Event(log::Level::Warning, "provider_untested",
                    {log::Field::Str("version", provider::ToString(version)),
                     log::Field::Str("note", "not verified yet; please report whether it works")});
+}
 
-    // Normally already done inside the load; this covers a runtime that
-    // arrived some other way.
-    provider::UnlockMultiFrame(module, false);
-    kernels::BuildProviderIndex(module);
+// Called on every module scan. Indexing happens before the runtime creates any
+// kernel, and resolving the target here keeps the cost of initializing CUDA off
+// the game's render thread.
+//
+// Every mapped runtime is indexed, not only the first: which of them creates
+// the kernels is NGX's choice, made later, and an index built from one build
+// holds no image that belongs in another.
+void InspectProvider() {
+    // Recorded, and so pinned, before anything reads the image: both the gate
+    // scan and the index read the module's sections directly, and a runtime NGX
+    // has replaced can be unloaded between this enumeration and those reads.
+    // A runtime loaded under a file name of its own, which a redirect does, is
+    // already on the list from the load hook.
+    for (HMODULE module : paths::LoadedComponents(kRuntimeName))
+        RecordRuntime(module);
+
+    for (HMODULE module : KnownRuntimes()) {
+        if (!provider::IsDlssgProvider(module) || kernels::ProviderIndexed(module))
+            continue;
+        ReportProvider(module);
+        // Normally already done inside the load; this covers a runtime that
+        // arrived some other way.
+        provider::UnlockMultiFrame(module, false);
+        kernels::BuildProviderIndex(module);
+    }
+
+    // Resolving the target initializes CUDA, which belongs on this thread and
+    // not on the render thread that creates the first kernel. It answers
+    // nothing until NVAPI has identified the GPU, so it is asked on every scan
+    // until it does; after that it is an atomic load.
     kernels::TargetSm();
 }
 
@@ -169,9 +235,8 @@ void ReportNvidiaModules() {
 // before the worker wakes. Rewriting a few bytes suspends no other thread, so
 // unlike installing a hook it is safe here, inside the load.
 void PrepareRuntime(HMODULE module) {
-    if (!provider::IsDlssgProvider(module))
+    if (!provider::IsDlssgProvider(module) || !RecordRuntime(module))
         return;
-    g_runtime.store(module, std::memory_order_release);
     provider::UnlockMultiFrame(module, true);
 }
 

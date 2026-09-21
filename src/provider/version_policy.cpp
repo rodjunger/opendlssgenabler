@@ -13,12 +13,13 @@ namespace {
 // PRAGMATA and Jurassic World Evolution 3, 310.5.2 in Corsair Cove, all
 // Direct3D 12, and 310.6 in DOOM The Dark Ages (Vulkan). Matched on
 // major.minor.build. 310.9.1 was verified through [Runtime] Mode=Bundled rather
-// than as a runtime a game ships.
+// than as a runtime a game ships, and 310.9.0 as the runtime NGX loads for a
+// driver profile with the DLSS override enabled.
 struct Tested {
     uint16_t major, minor, build;
 };
-constexpr std::array<Tested, 5> kTested{
-    {{310, 2, 1}, {310, 3, 0}, {310, 5, 2}, {310, 6, 0}, {310, 9, 1}}};
+constexpr std::array<Tested, 6> kTested{
+    {{310, 2, 1}, {310, 3, 0}, {310, 5, 2}, {310, 6, 0}, {310, 9, 0}, {310, 9, 1}}};
 
 // The version-info APIs are resolved from the System32 copy of version.dll at
 // runtime rather than imported. A static import would be a self-reference when

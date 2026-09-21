@@ -192,44 +192,67 @@ PtxSource PreferredSource() {
     return g_options.multi_frame ? PtxSource::Newest : PtxSource::Closest;
 }
 
+// Which runtime's images may answer this call.
+//
+// Normally it is the module the call came from: its own build's images are the
+// only ones that are this kernel, and the driver refuses another build's as an
+// invalid image. The caller cannot always be identified, though. Another tool
+// that hooks the same entry point calls through a trampoline that belongs to no
+// module, and then the return address names nothing. While only one runtime is
+// indexed there is no ambiguity to protect against, so that one answers; once
+// there are several, an unattributable call is refused rather than guessed.
+HMODULE AnsweringProvider(HMODULE caller) {
+    if (caller)
+        return caller;
+    return SoleIndexedProvider();
+}
+
 // A bare cubin carries machine code only. It is either runnable as it is, has a
-// native twin in the runtime, came from a container whose PTX can be
-// retargeted, or cannot be supplied at all.
-Decision DecideCubin(const void* blob, size_t size, uint32_t cubin_arch, uint32_t target,
-                     PtxSource source, std::vector<uint8_t>& out, Report& report,
+// native twin in the runtime it came from, came from a container whose PTX can
+// be retargeted, or cannot be supplied at all.
+Decision DecideCubin(HMODULE caller, const void* blob, size_t size, uint32_t cubin_arch,
+                     uint32_t target, PtxSource source, std::vector<uint8_t>& out, Report& report,
                      const char*& reason) {
     report.source_arch = cubin_arch;
     if (CanRun(false, cubin_arch, target)) {
         reason = "runnable";
         return Decision::Unchanged;
     }
+    const HMODULE provider = AnsweringProvider(caller);
     size_t native_size = 0;
-    if (const void* native = FindNativeCubin(blob, size, target, native_size)) {
+    if (const void* native = FindNativeCubin(provider, blob, size, target, native_size)) {
         const auto* bytes = static_cast<const uint8_t*>(native);
         out.assign(bytes, bytes + native_size);
         report.native = true;
         return Decision::Substituted;
     }
     size_t container_size = 0;
-    if (const void* container = FindContainerForCubin(blob, size, container_size)) {
+    if (const void* container = FindContainerForCubin(provider, blob, size, container_size)) {
         Report retarget;
         if (Retarget(container, container_size, target, out, retarget, source)) {
             report.source_arch = retarget.source_arch;
             return Decision::Substituted;
         }
     }
-    reason = "no runnable image for this architecture";
+    // Nothing can be supplied, and the three reasons are different problems.
+    if (ProviderIndexed(provider))
+        reason = "no runnable image for this architecture";
+    else if (provider)
+        reason = "this runtime was not indexed";
+    else
+        reason = "the calling module could not be identified";
     return Decision::Refused;
 }
 
-Decision DecideFrom(const void* blob, size_t size, PtxSource source, uint32_t target,
-                    std::vector<uint8_t>& out, Report& report, const char*& reason) {
+Decision DecideFrom(HMODULE caller, const void* blob, size_t size, PtxSource source,
+                    uint32_t target, std::vector<uint8_t>& out, Report& report,
+                    const char*& reason) {
     if (!target || !blob || !size) {
         reason = !RetargetingEnabled() ? "inactive" : target ? "empty" : "no target architecture";
         return Decision::Unchanged;
     }
     if (const uint32_t cubin_arch = CubinArch(blob, size))
-        return DecideCubin(blob, size, cubin_arch, target, source, out, report, reason);
+        return DecideCubin(caller, blob, size, cubin_arch, target, source, out, report, reason);
     if (ContainerSize(blob, size)) {
         if (Retarget(blob, size, target, out, report, source))
             return Decision::Substituted;
@@ -277,7 +300,7 @@ Decision Decide(const void* blob, size_t size, const Request& request, std::vect
     const uint32_t target = TargetSm();
     const uint32_t index = g_decisions.fetch_add(1, std::memory_order_relaxed);
     const Decision decision =
-        DecideFrom(blob, size, PreferredSource(), target, out, report, reason);
+        DecideFrom(request.module, blob, size, PreferredSource(), target, out, report, reason);
     t_last_source_arch = decision == Decision::Substituted ? report.source_arch : 0;
 
     // Only decisions are dumped: the cap is small, and images passed through
@@ -300,8 +323,8 @@ bool Fallback(const void* blob, size_t size, uint32_t status, const Request& req
         return false;
     Report report;
     const char* reason = "";
-    if (DecideFrom(blob, size, PtxSource::Closest, TargetSm(), out, report, reason) !=
-            Decision::Substituted ||
+    if (DecideFrom(request.module, blob, size, PtxSource::Closest, TargetSm(), out, report,
+                   reason) != Decision::Substituted ||
         report.source_arch == rejected_source)
         return false;
     log::Event(log::Level::Warning, "kernel_fallback",
@@ -359,6 +382,7 @@ Decision Apply(void* params, const void* return_address) {
 
     Request request;
     request.route = kRouteD3D12;
+    request.module = paths::ModuleForAddress(return_address);
     request.caller = paths::ModuleNameForAddress(return_address);
     request.kernel = ReadName(params, fields);
     const Decision decision = Decide(data, size, request, t_buffer);
