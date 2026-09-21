@@ -95,14 +95,25 @@ void TestShippedIni() {
     for (const std::string& rejected : ini.Rejected())
         std::printf("  rejected: %s\n", rejected.c_str());
     CHECK(ini.Rejected().empty());
+    // The shipped file is what every install runs, so every key it sets has to
+    // agree with the default the code would have used without it.
     const odg::app::Settings defaults;
     CHECK(loaded.enabled == defaults.enabled);
+    CHECK(loaded.spoof_arch_to_game == defaults.spoof_arch_to_game);
     CHECK(loaded.spoof_callers == defaults.spoof_callers);
     CHECK(loaded.patch_flip_metering == defaults.patch_flip_metering);
     CHECK(loaded.flip_metering_value == defaults.flip_metering_value);
     CHECK(loaded.patch_frame_clamp == defaults.patch_frame_clamp);
+    CHECK(loaded.stub_scg_priority == defaults.stub_scg_priority);
+    CHECK(loaded.force_multiplier == defaults.force_multiplier);
+    CHECK(loaded.multi_frame == defaults.multi_frame);
     CHECK(loaded.retarget_kernels == defaults.retarget_kernels);
+    CHECK(loaded.target_sm == defaults.target_sm);
     CHECK(loaded.vulkan_hooks == defaults.vulkan_hooks);
+    CHECK(loaded.redirect_runtime == defaults.redirect_runtime);
+    CHECK(loaded.runtime_file == defaults.runtime_file);
+    CHECK(loaded.streamline_diagnostics == defaults.streamline_diagnostics);
+    CHECK(loaded.dump_kernels == defaults.dump_kernels);
     CHECK(loaded.log_level == defaults.log_level);
     CHECK(loaded.log_directory == defaults.log_directory);
 }

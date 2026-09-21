@@ -6,7 +6,8 @@ How to try opendlssg-fg on a game, and what a healthy run looks like in the log.
 
 1. Install as described in the [README](../README.md#installing).
 2. In `opendlssg.ini`, set `Level=3` under `[Logging]` and
-   `StreamlineDiagnostics=1` under `[Debug]`.
+   `StreamlineDiagnostics=1` under `[Debug]`. Every setting is described in
+   [CONFIGURATION.md](CONFIGURATION.md).
 3. Start the game, enable DLSS Frame Generation, and play for a minute.
 
 Level 3 is for investigating a game, not for using one: it records every call

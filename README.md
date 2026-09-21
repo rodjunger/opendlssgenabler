@@ -50,7 +50,10 @@ What follows from that:
 3. Copy `version.dll` and `opendlssg.ini` next to the game's executable. If a
    `version.dll` is already there, back it up first. In an Unreal Engine game
    that is `<Game>\Binaries\Win64`, beside `<Game>-Win64-Shipping.exe`, not the
-   launcher in the install folder.
+   launcher in the install folder. Ship `opendlssg.ini` as it comes; its
+   defaults are the ones to run, and
+   [docs/CONFIGURATION.md](docs/CONFIGURATION.md) covers the few cases that
+   need an edit.
 4. Start the game and enable DLSS Frame Generation in its graphics settings.
 
 If no `opendlssg\logs` folder appears next to the executable, the game does not
@@ -92,11 +95,12 @@ the engine makes and where, and how to read the logs.
 Set `Level=3` under `[Logging]` and `StreamlineDiagnostics=1` under `[Debug]` in
 `opendlssg.ini`, reproduce the problem, and attach the files from
 `opendlssg\logs`. [docs/TESTING.md](docs/TESTING.md) lists what a healthy run looks
-like.
+like, and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) explains every setting.
 
 ## Documentation
 
 - [How it works](docs/ARCHITECTURE.md)
+- [Configuration](docs/CONFIGURATION.md)
 - [Building](docs/BUILD.md)
 - [Testing a game](docs/TESTING.md)
 
