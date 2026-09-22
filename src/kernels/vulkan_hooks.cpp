@@ -41,13 +41,14 @@ constexpr int32_t kVkErrorUnknown = -13;
 constexpr uint32_t kLoggedFunctionFailures = 16;
 
 using PfnVoidFunction = void(__stdcall*)();
-using PfnGetDeviceProcAddr = PfnVoidFunction(__stdcall*)(void* device, const char* name);
+using PfnGetProcAddr = PfnVoidFunction(__stdcall*)(void* instance_or_device, const char* name);
 using PfnCreateCuModule = int32_t(__stdcall*)(void* device, const CuModuleCreateInfo* info,
                                               const void* allocator, uint64_t* out_module);
 using PfnCreateCuFunction = int32_t(__stdcall*)(void* device, const CuFunctionCreateInfo* info,
                                                 const void* allocator, uint64_t* out_function);
 
-std::atomic<PfnGetDeviceProcAddr> g_get_device_proc_addr{nullptr};
+std::atomic<PfnGetProcAddr> g_get_device_proc_addr{nullptr};
+std::atomic<PfnGetProcAddr> g_get_instance_proc_addr{nullptr};
 std::atomic<PfnCreateCuModule> g_create_cu_module{nullptr};
 std::atomic<PfnCreateCuFunction> g_create_cu_function{nullptr};
 std::atomic<uint32_t> g_function_failures{0};
@@ -130,8 +131,21 @@ PfnVoidFunction Intercept(const char* name, PfnVoidFunction resolved) {
 }
 
 PfnVoidFunction __stdcall HookedGetDeviceProcAddr(void* device, const char* name) {
-    PfnGetDeviceProcAddr original = g_get_device_proc_addr.load(std::memory_order_acquire);
+    PfnGetProcAddr original = g_get_device_proc_addr.load(std::memory_order_acquire);
     return original ? Intercept(name, original(device, name)) : nullptr;
+}
+
+PfnVoidFunction __stdcall HookedGetInstanceProcAddr(void* instance, const char* name) {
+    PfnGetProcAddr original = g_get_instance_proc_addr.load(std::memory_order_acquire);
+    return original ? Intercept(name, original(instance, name)) : nullptr;
+}
+
+// Hooks one of the loader's exported resolvers. The export may be a jump stub,
+// which is followed to the function it leads to.
+bool HookResolver(HMODULE loader, const char* name, void* detour,
+                  std::atomic<PfnGetProcAddr>& slot) {
+    void* exported = hooks::detail::Export(loader, name);
+    return exported && hooks::Install(pe::ResolveJumpThunk(exported), detour, slot, name);
 }
 
 } // namespace
@@ -152,23 +166,31 @@ bool InstallVulkanHooks() {
         return true;
     }
 
-    // The extension functions are exported by nobody; vkGetDeviceProcAddr hands
-    // them out, so that is where they are taken over. The export may be a jump
-    // stub, which is followed to the function it leads to. vkGetInstanceProcAddr
-    // is left alone: it serves global and instance commands on much hotter
-    // paths, and a device extension function does not come from it.
-    void* exported = hooks::detail::Export(module, "vkGetDeviceProcAddr");
-    if (!exported || !hooks::Install(pe::ResolveJumpThunk(exported),
+    // The extension functions are exported by nobody; the loader's resolvers
+    // hand them out, so that is where they are taken over. Both resolvers can
+    // answer for a device function: vkGetInstanceProcAddr returns a trampoline
+    // that dispatches through the device. A resolution through the one left
+    // unhooked would hand the driver an image this GPU cannot run, so both are
+    // hooked, and each only compares the name it was asked for.
+    const bool device = HookResolver(module, "vkGetDeviceProcAddr",
                                      reinterpret_cast<void*>(&HookedGetDeviceProcAddr),
-                                     g_get_device_proc_addr, "vkGetDeviceProcAddr")) {
+                                     g_get_device_proc_addr);
+    const bool instance = HookResolver(module, "vkGetInstanceProcAddr",
+                                       reinterpret_cast<void*>(&HookedGetInstanceProcAddr),
+                                       g_get_instance_proc_addr);
+    if (!device || !instance) {
         // Attempted once: a hook that fails to install on a loaded, pinned
         // loader will not start working.
         log::Event(log::Level::Warning, "vulkan_hooks_unavailable",
-                   {log::Field::Str("note", "the Vulkan loader could not be hooked. Direct3D 12 "
-                                            "games are unaffected; a Vulkan game's frame "
-                                            "generation will have no kernels it can run.")});
-        FreeLibrary(module);
-        return false;
+                   {log::Field::Bool("device_resolver", device),
+                    log::Field::Bool("instance_resolver", instance),
+                    log::Field::Str("note", "the Vulkan loader could not be fully hooked. "
+                                            "Direct3D 12 games are unaffected; a Vulkan game's "
+                                            "frame generation may have no kernels it can run.")});
+        if (!device && !instance) {
+            FreeLibrary(module);
+            return false;
+        }
     }
     log::Event(log::Level::Info, "vulkan_hooks_installed",
                {log::Field::Str("module", paths::ModuleFileName(module).c_str())});

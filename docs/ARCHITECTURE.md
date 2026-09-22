@@ -76,7 +76,7 @@ process, and only on a GPU that needs it.
 | 3b | `nvngx_dlssg` comparisons against the Blackwell id | Compare against Ada instead | [Multi-frame](#multi-frame-generation): 3x and above |
 | 4 | `nvapi64` `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Kernel image replaced | Gate 4, Direct3D 12, one cubin at a time |
 | 4b | `nvapi64` `NvAPI_D3D12_CreateCuModule` | Fatbin replaced | Gate 4, Direct3D 12, runtimes from 310.7 |
-| 5 | Vulkan loader `vkGetDeviceProcAddr` | Hands out a wrapper for `vkCreateCuModuleNVX` | Gate 4, Vulkan route |
+| 5 | Vulkan loader `vkGetDeviceProcAddr` and `vkGetInstanceProcAddr` | Hand out a wrapper for `vkCreateCuModuleNVX` | Gate 4, Vulkan route |
 | 6 | `kernel32` `LoadLibraryExW` | Wakes the engine's worker when a library loads; applies 3b inside the runtime's load | Timing |
 | 7 | `sl.interposer` exports | Observed and logged | Diagnostics; see [below](#diagnosing-a-problem) |
 
@@ -342,7 +342,7 @@ indexed at all.
 |---|---|---|
 | Direct3D 12 | `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Inline hook on the function |
 | Direct3D 12, from 310.7 | `NvAPI_D3D12_CreateCuModule` | Inline hook on the function |
-| Vulkan | `vkCreateCuModuleNVX` (`VK_NVX_binary_import`) | Wrapper returned by `vkGetDeviceProcAddr` |
+| Vulkan | `vkCreateCuModuleNVX` (`VK_NVX_binary_import`) | Wrapper returned by the loader's `vkGet*ProcAddr` |
 
 The NVAPI parameter block is versioned and not public. The engine finds the image
 inside it by searching for a pointer to a fatbin container and a field holding the
@@ -354,8 +354,11 @@ one does:
 cubin_params_located struct_size=0x50 data_offset=0x18 size_offset=0x20 name_offset=0x38
 ```
 
-The Vulkan extension function is exported by nobody; `vkGetDeviceProcAddr` hands
-it out, so that is where the engine takes it over.
+The Vulkan extension function is exported by nobody; the loader hands it out,
+so that is where the engine takes it over. Both of the loader's resolvers are
+hooked, because `vkGetInstanceProcAddr` also answers for a device function,
+with a trampoline that dispatches through the device. A resolution through an
+unhooked one would reach the driver with an image this GPU cannot run.
 
 A cubin's length is read from its ELF header and includes the program headers,
 which follow the section table. Stopping at the section table hands the driver a
@@ -520,7 +523,8 @@ Windows records each one in the System event log: provider `nvlddmkm`, message
 `Restarting TDR occurred`. That entry is what distinguishes the two.
 
 **Vulkan hook unavailable.** `vulkan_hooks_unavailable` means the Vulkan loader
-was loaded and its `vkGetDeviceProcAddr` could not be hooked. Many Direct3D 12
+was loaded and one of its resolvers could not be hooked, named by
+`device_resolver` and `instance_resolver`. Many Direct3D 12
 games load the loader only to probe for Vulkan and unload it again; the engine
 holds a reference while it hooks, and a loader that is already gone is simply
 tried again later, so that probe is not an error. Direct3D 12 games are

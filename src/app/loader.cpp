@@ -208,8 +208,8 @@ void InspectLoadedModules() {
     }
 
     // A Vulkan title hands its kernels to the driver through
-    // VK_NVX_binary_import. The extension function is resolved through
-    // vkGetDeviceProcAddr, and every resolution funnels through the loader.
+    // VK_NVX_binary_import. The extension function is resolved through the
+    // loader's vkGet*ProcAddr, and every resolution funnels through it.
     if (g_vulkan_hooks.load(std::memory_order_acquire))
         kernels::InstallVulkanHooks();
 
