@@ -114,10 +114,9 @@ std::optional<x86::ByteStore> FallbackStore(const std::byte* reference) {
     return std::nullopt;
 }
 
-void AnalyzeFlipMetering(const hat::process::module& plugin, PluginAnalysis& analysis) {
-    const std::span<const std::byte> code = plugin.get_executable_data();
-    const auto marker =
-        hat::find_pattern(std::span<const std::byte>(plugin.get_module_data()), signature::Literal(kFlipMeteringMarker));
+void AnalyzeFlipMetering(std::span<const std::byte> image, std::span<const std::byte> code,
+                         PluginAnalysis& analysis) {
+    const auto marker = hat::find_pattern(image, signature::Literal(kFlipMeteringMarker));
     if (!marker.has_result()) {
         analysis.flip_metering_problem = "marker string not found";
         return;
@@ -158,9 +157,8 @@ void AnalyzeFlipMetering(const hat::process::module& plugin, PluginAnalysis& ana
     analysis.flip_metering = std::move(flip);
 }
 
-void AnalyzeFrameClamp(const hat::process::module& plugin, PluginAnalysis& analysis) {
-    const auto matches = hat::find_all_pattern(
-        std::span<const std::byte>(plugin.get_executable_data()), kFrameCountClamp);
+void AnalyzeFrameClamp(std::span<const std::byte> code, PluginAnalysis& analysis) {
+    const auto matches = hat::find_all_pattern(code, kFrameCountClamp);
     analysis.frame_clamp_matches = matches.size();
     if (matches.size() != 1)
         return;
@@ -214,8 +212,13 @@ PluginAnalysis AnalyzePlugin(HMODULE plugin) {
         analysis.flip_metering_problem = "not a loaded module";
         return analysis;
     }
-    AnalyzeFlipMetering(*module, analysis);
-    AnalyzeFrameClamp(*module, analysis);
+    return AnalyzePlugin(module->get_module_data(), module->get_executable_data());
+}
+
+PluginAnalysis AnalyzePlugin(std::span<const std::byte> image, std::span<const std::byte> code) {
+    PluginAnalysis analysis;
+    AnalyzeFlipMetering(image, code, analysis);
+    AnalyzeFrameClamp(code, analysis);
     return analysis;
 }
 

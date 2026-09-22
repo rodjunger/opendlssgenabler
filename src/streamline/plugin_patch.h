@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 // In-memory patches to the Streamline DLSS-G plugin (sl.dlss_g.dll). They are
@@ -47,6 +48,8 @@ struct PluginAnalysis {
 
 // Finds the patch sites in a loaded sl.dlss_g.dll. Changes nothing.
 PluginAnalysis AnalyzePlugin(HMODULE plugin);
+// The same, over `code` within `image`, the span the marker string is found in.
+PluginAnalysis AnalyzePlugin(std::span<const std::byte> image, std::span<const std::byte> code);
 
 // Selects which patches apply. Either can be turned off to isolate a fault.
 void SetPatchesEnabled(bool flip_metering, bool frame_clamp);

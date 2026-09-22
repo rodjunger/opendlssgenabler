@@ -1,6 +1,7 @@
 // Unit tests for the parts of the engine that are pure logic: configuration
 // parsing, the fatbin container, cubins, the CUDA compatibility rule, x86
-// decoding and text conversion. They need no GPU and no game.
+// decoding, the patch-site analysis of NVIDIA's binaries on synthetic code, and
+// text conversion. They need no GPU and no game.
 //
 // Build with -DODG_BUILD_TESTS=ON and run odg_unit_tests.exe on Windows.
 
@@ -16,6 +17,8 @@
 #include "kernels/fatbin.h"
 #include "kernels/provider_index.h"
 #include "kernels/substitute.h"
+#include "provider/multi_frame.h"
+#include "streamline/plugin_patch.h"
 
 #include <lz4.h>
 
@@ -23,7 +26,10 @@
 
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <initializer_list>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -546,6 +552,107 @@ void TestConditions() {
     CHECK(compare && ConditionTested(*odg::x86::Decode(compare->Next())) == Condition::Ordering);
 }
 
+// Writes `bytes` at `offset`, and a `lea reg, [rip + rel32]` there whose
+// operand is `target`: the three opcode bytes are given, the rel32 computed.
+void PutLea(std::vector<uint8_t>& out, size_t offset, std::initializer_list<uint8_t> opcode,
+            size_t target) {
+    std::copy(opcode.begin(), opcode.end(), out.begin() + static_cast<std::ptrdiff_t>(offset));
+    const size_t next = offset + opcode.size() + sizeof(int32_t);
+    Put<int32_t>(out, offset + opcode.size(), static_cast<int32_t>(target - next));
+}
+
+void PutBytes(std::vector<uint8_t>& out, size_t offset, std::initializer_list<uint8_t> bytes) {
+    std::copy(bytes.begin(), bytes.end(), out.begin() + static_cast<std::ptrdiff_t>(offset));
+}
+
+void PutText(std::vector<uint8_t>& out, size_t offset, const char* text) {
+    std::memcpy(out.data() + offset, text, std::strlen(text) + 1);
+}
+
+std::span<const std::byte> Bytes(const std::vector<uint8_t>& data, size_t size) {
+    return {reinterpret_cast<const std::byte*>(data.data()), size};
+}
+
+// The three shapes a comparison against Blackwell's id takes in the runtime,
+// and which of them is moved.
+void TestMultiFrameGates() {
+    constexpr size_t kCode = 64, kImage = 160;
+    constexpr size_t kMultiFrameName = 64, kReflexName = 100;
+    std::vector<uint8_t> image(kImage, 0x90);
+    PutBytes(image, 0, {0x3D, 0xB0, 0x01, 0x00, 0x00});       // cmp eax, 0x1B0
+    PutBytes(image, 5, {0x0F, 0x93, 0xC0});                   // setae al
+    PutLea(image, 8, {0x48, 0x8D, 0x15}, kMultiFrameName);    // lea rdx, "DLSSG.MultiFrameCountMax"
+    PutBytes(image, 15, {0x81, 0xFE, 0xB0, 0x01, 0x00, 0x00}); // cmp esi, 0x1B0
+    PutBytes(image, 21, {0x0F, 0x94, 0xC0});                  // sete al
+    PutBytes(image, 24, {0x3D, 0xB0, 0x01, 0x00, 0x00});      // cmp eax, 0x1B0
+    PutBytes(image, 29, {0x7C, 0x05});                        // jl
+    PutLea(image, 31, {0x48, 0x8D, 0x0D}, kReflexName);       // lea rcx, "DLSSG.ReflexWarp.Available"
+    PutText(image, kMultiFrameName, "DLSSG.MultiFrameCountMax");
+    PutText(image, kReflexName, "DLSSG.ReflexWarp.Available");
+
+    const auto gates = odg::provider::FindMultiFrameGates(Bytes(image, kImage), Bytes(image, kCode));
+    CHECK(gates.size() == 3);
+    // Found per encoding, so looked up by where each comparison is.
+    const auto at = [&](size_t immediate) -> const odg::provider::Gate* {
+        for (const auto& gate : gates) {
+            if (gate.immediate == reinterpret_cast<const std::byte*>(image.data()) + immediate)
+                return &gate;
+        }
+        return nullptr;
+    };
+    const auto* floor = at(1);
+    const auto* equality = at(17);
+    const auto* other = at(25);
+    CHECK(floor && equality && other);
+    if (!floor || !equality || !other)
+        return;
+    // The floor the multi-frame count is published from is moved.
+    CHECK(floor->unlock && floor->publishes == "DLSSG.MultiFrameCountMax");
+    // A comparison read for equality asks something else, and is left.
+    CHECK(!equality->unlock && equality->condition == odg::x86::Condition::Equality);
+    // An ordering test that publishes another capability is left too.
+    CHECK(!other->unlock && other->condition == odg::x86::Condition::Ordering);
+    CHECK(other->publishes == "DLSSG.ReflexWarp.Available");
+}
+
+// Flip metering and the frame clamp as the plugin compiles them: the fallback
+// store after the marker's reference gives the flag and its off value, and
+// every store of the other value to that flag is found.
+void TestPluginAnalysis() {
+    constexpr size_t kCode = 128, kImage = 192, kMarker = 128;
+    std::vector<uint8_t> image(kImage, 0x90);
+    PutLea(image, 0, {0x48, 0x8D, 0x0D}, kMarker);                     // lea rcx, marker
+    PutBytes(image, 7, {0xE8, 0x00, 0x00, 0x00, 0x00});                // call (the log)
+    PutBytes(image, 12, {0xC6, 0x83, 0xBC, 0x38, 0x00, 0x00, 0x00});   // mov [rbx+38BCh], 0
+    PutBytes(image, 20, {0xC6, 0x86, 0xBC, 0x38, 0x00, 0x00, 0x01});   // mov [rsi+38BCh], 1
+    PutBytes(image, 27, {0xC6, 0x83, 0xBC, 0x38, 0x00, 0x00, 0x01});   // mov [rbx+38BCh], 1
+    PutBytes(image, 34, {0xC6, 0x83, 0xBD, 0x38, 0x00, 0x00, 0x01});   // another field
+    PutBytes(image, 41, {0xBA, 0x03, 0x00, 0x00, 0x00, 0x3B, 0xCA, 0x0F, 0x42, 0xD1}); // clamp
+    PutText(image, kMarker, "FG1 DLL has been detected");
+
+    const auto analysis =
+        odg::streamline::AnalyzePlugin(Bytes(image, kImage), Bytes(image, kCode));
+    const auto* base = reinterpret_cast<const std::byte*>(image.data());
+    CHECK(analysis.flip_metering.has_value());
+    if (const auto& flip = analysis.flip_metering) {
+        CHECK(flip->flag_offset == 0x38BC && flip->off_value == 0);
+        CHECK(flip->opposite_stores.size() == 2);
+        CHECK(flip->opposite_stores.size() == 2 && flip->opposite_stores[0] == base + 26 &&
+              flip->opposite_stores[1] == base + 33);
+    }
+    CHECK(analysis.frame_clamp.has_value());
+    if (const auto& clamp = analysis.frame_clamp)
+        CHECK(clamp->limit == 3 && clamp->cmov == base + 48);
+
+    // Without the marker nothing is found, and the reason says so.
+    std::vector<uint8_t> unmarked = image;
+    PutText(unmarked, kMarker, "something else entirely");
+    const auto missing =
+        odg::streamline::AnalyzePlugin(Bytes(unmarked, kImage), Bytes(unmarked, kCode));
+    CHECK(!missing.flip_metering && std::string(missing.flip_metering_problem) ==
+                                        "marker string not found");
+}
+
 void TestLogLevels() {
     using odg::log::Level;
     using odg::log::LevelFromSetting;
@@ -682,6 +789,8 @@ int main() {
     TestPathRedaction();
     TestLogLevels();
     TestConditions();
+    TestMultiFrameGates();
+    TestPluginAnalysis();
     TestLogPruning();
     std::printf("%d checks, %d failed\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

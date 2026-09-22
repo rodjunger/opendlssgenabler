@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <cstddef>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,10 @@ struct Gate {
 
 // Every comparison against Blackwell's id, classified. Changes nothing.
 std::vector<Gate> FindMultiFrameGates(HMODULE provider);
+// The same, over `code` within `image`, the span a published parameter's name
+// has to lie in.
+std::vector<Gate> FindMultiFrameGates(std::span<const std::byte> image,
+                                      std::span<const std::byte> code);
 
 void SetMultiFrameEnabled(bool enabled);
 bool MultiFrameEnabled();

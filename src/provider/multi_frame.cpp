@@ -87,16 +87,22 @@ std::string PublishedParameter(std::span<const std::byte> image, const std::byte
 } // namespace
 
 std::vector<Gate> FindMultiFrameGates(HMODULE provider) {
-    std::vector<Gate> gates;
     const auto module = hat::process::module_at(provider);
     if (!module)
-        return gates;
-    const std::span<const std::byte> image = module->get_module_data();
-    const std::span<const std::byte> code = module->get_executable_data();
+        return {};
+    return FindMultiFrameGates(module->get_module_data(), module->get_executable_data());
+}
+
+std::vector<Gate> FindMultiFrameGates(std::span<const std::byte> image,
+                                      std::span<const std::byte> code) {
+    std::vector<Gate> gates;
     for (const Encoding& encoding : Encodings()) {
         for (const auto& match : hat::find_all_pattern(code, encoding.pattern)) {
-            // Decoding at the match confirms the bytes form one instruction of
-            // the expected length, not the tail of something else.
+            // Decoding at the match confirms the bytes read as a comparison of
+            // the expected length. It cannot tell whether they are really the
+            // tail of an earlier instruction; the reader below, and the bound
+            // on how many gates a build may have, are what keep such a match
+            // from being rewritten.
             const auto compare = x86::Decode(match.get());
             if (!compare || compare->length != encoding.immediate + sizeof(uint32_t))
                 continue;

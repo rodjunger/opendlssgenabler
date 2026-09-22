@@ -71,7 +71,8 @@ int Probe(const char* path) {
         ReportRuntime(module);
     else if (!ReportPlugin(module))
         status = 1;
-    FreeLibrary(module);
+    // Kept mapped: the kernel index is keyed by module, and a later file
+    // mapped at the same address would otherwise be taken as indexed already.
     return status;
 }
 
