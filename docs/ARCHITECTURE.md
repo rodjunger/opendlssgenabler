@@ -545,4 +545,4 @@ it can run.
 | `src/provider` | Identifies the runtime and its version; the multi-frame gates |
 | `tests` | Unit tests for the pure logic |
 | `tools/ptxprobe` | Checks a runtime's kernels against the installed driver, without a game |
-| `tools/patchprobe` | Reports what the patches would change in an `sl.dlss_g.dll` or `nvngx_dlssg.dll`, without a game |
+| `tools/patchprobe` | Reports what the patches would change in an `sl.dlss_g.dll` or `nvngx_dlssg.dll`, and a runtime's kernel index, without a game |

@@ -48,16 +48,18 @@ cmake --build build
 
 - `build/odg_unit_tests.exe` checks the pure logic: configuration parsing, the
   shipped `opendlssg.ini`, fatbin, cubin and PTX handling, the NVAPI parameter
-  block search, x86 decoding, the CUDA compatibility rule, UTF-8 conversion and
-  log pruning. Run it on Windows; it needs no GPU. From WSL:
-  `cmd.exe /c build\\odg_unit_tests.exe` from a Windows path.
+  block search, x86 decoding, the CUDA compatibility rule, UTF-8 conversion, log
+  pruning and the patch-site analysis on synthetic code. Run it on Windows; it
+  needs no GPU. From WSL: `cmd.exe /c build\\odg_unit_tests.exe` from a Windows
+  path.
 - `build/ptxprobe.exe <nvngx_dlssg.dll> [target_sm] [newest]` checks, against the
   installed driver and without a game, that every PTX kernel in a runtime
   retargets and compiles for this GPU. `newest` checks the sources multi-frame
   generation uses. Use it on a runtime version nobody has tested yet.
 - `build/patchprobe.exe <dll>...` reports what the patches would change, without a
   game: for `sl.dlss_g.dll` the flip-metering flag, the writes that would be
-  patched and the frame-count clamp; for `nvngx_dlssg.dll` the multi-frame gates.
+  patched and the frame-count clamp; for `nvngx_dlssg.dll` the multi-frame gates
+  and what the kernel index finds, including any image it cannot attribute.
   Use it on a build nobody has tested yet.
 
 ## Proxy stubs
