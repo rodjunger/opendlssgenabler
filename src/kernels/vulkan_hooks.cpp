@@ -55,8 +55,6 @@ std::atomic<uint32_t> g_function_failures{0};
 std::atomic<bool> g_installed{false};
 std::atomic<bool> g_intercept_reported{false};
 
-thread_local std::vector<uint8_t> t_buffer;
-
 constexpr wchar_t kLoaderName[] = L"vulkan-1.dll";
 
 int32_t __stdcall HookedCreateCuModule(void* device, const CuModuleCreateInfo* info,
@@ -67,12 +65,9 @@ int32_t __stdcall HookedCreateCuModule(void* device, const CuModuleCreateInfo* i
     if (!info)
         return original(device, info, allocator, out_module);
 
-    Request request;
-    request.route = kRouteVulkan;
-    const void* caller = ODG_RETURN_ADDRESS();
-    request.module = paths::ModuleForAddress(caller);
-    request.caller = paths::ModuleNameForAddress(caller);
-    switch (Decide(info->data, info->data_size, request, t_buffer)) {
+    const Request request = Request::From(kRouteVulkan, ODG_RETURN_ADDRESS());
+    Substitution substitution;
+    switch (Decide(info->data, info->data_size, request, substitution)) {
     case Decision::Unchanged:
         return original(device, info, allocator, out_module);
     case Decision::Refused:
@@ -82,18 +77,13 @@ int32_t __stdcall HookedCreateCuModule(void* device, const CuModuleCreateInfo* i
     case Decision::Substituted:
         break;
     }
-    CuModuleCreateInfo substituted = *info;
-    substituted.data = t_buffer.data();
-    substituted.data_size = t_buffer.size();
-    int32_t status = original(device, &substituted, allocator, out_module);
-    if (status != 0 &&
-        Fallback(info->data, info->data_size, static_cast<uint32_t>(status), request, t_buffer)) {
-        substituted.data = t_buffer.data();
-        substituted.data_size = t_buffer.size();
-        status = original(device, &substituted, allocator, out_module);
-    }
-    ReportDriverResult(static_cast<uint32_t>(status), kRouteVulkan);
-    return status;
+    return CreateSubstituted(info->data, info->data_size, request, substitution,
+                             [&](const std::vector<uint8_t>& image) {
+                                 CuModuleCreateInfo substituted = *info;
+                                 substituted.data = image.data();
+                                 substituted.data_size = image.size();
+                                 return original(device, &substituted, allocator, out_module);
+                             });
 }
 
 // A function the runtime cannot find is the difference between a pipeline that

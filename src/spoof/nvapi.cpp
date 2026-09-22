@@ -82,8 +82,6 @@ std::atomic<PfnCreateCuFunction> g_create_cu_function{nullptr};
 std::atomic<uint32_t> g_cu_function_failures{0};
 std::atomic<bool> g_cu_module_reported{false};
 
-thread_local std::vector<uint8_t> t_module;
-
 // Idle, installing, installed. A failed attempt returns to idle so the next
 // module scan can try again.
 enum : int { kIdle, kInstalling, kInstalled };
@@ -218,14 +216,20 @@ uint32_t __cdecl HookedSetRawScgPriority(void* params) {
 }
 
 // The parameter block is versioned and its layout is not public, so it is
-// treated as opaque: kernels::Apply finds the container inside it and swaps in
-// one this GPU can run.
+// treated as opaque: kernels::ReadCubinCall finds the image inside it, and the
+// pointer and length are rewritten for the call and restored after it.
 uint32_t __cdecl HookedCreateCubinShaderExV2(void* params) {
     PfnCreateCubinShaderExV2 original = g_create_cubin_shader.load(std::memory_order_acquire);
     if (!original)
         return kNvApiError;
+    const auto call = kernels::Active() ? kernels::ReadCubinCall(params) : std::nullopt;
+    if (!call)
+        return original(params);
 
-    switch (kernels::Apply(params, ODG_RETURN_ADDRESS())) {
+    kernels::Request request = kernels::Request::From(kernels::kRouteD3D12, ODG_RETURN_ADDRESS());
+    request.kernel = call->kernel;
+    kernels::Substitution substitution;
+    switch (kernels::Decide(call->data, call->size, request, substitution)) {
     case kernels::Decision::Unchanged:
         return original(params);
     case kernels::Decision::Refused:
@@ -237,11 +241,12 @@ uint32_t __cdecl HookedCreateCubinShaderExV2(void* params) {
     case kernels::Decision::Substituted:
         break;
     }
-    uint32_t status = original(params);
-    if (status != 0 && kernels::ApplyFallback(params, status))
-        status = original(params);
-    kernels::Revert(params);
-    kernels::ReportDriverResult(status, kernels::kRouteD3D12);
+    const uint32_t status = kernels::CreateSubstituted(
+        call->data, call->size, request, substitution, [&](const std::vector<uint8_t>& image) {
+            kernels::WriteBlob(params, call->fields, image.data(), image.size());
+            return original(params);
+        });
+    kernels::WriteBlob(params, call->fields, call->data, call->size);
     return status;
 }
 
@@ -264,12 +269,10 @@ uint32_t __cdecl HookedCreateCuModule(void* device, const void* blob, uint32_t s
         log::Event(log::Level::Info, "cu_module_intercepted",
                    {log::Field::Str("route", kernels::kRouteD3D12)});
 
-    kernels::Request request;
-    request.route = kernels::kRouteD3D12;
-    const void* caller = ODG_RETURN_ADDRESS();
-    request.module = paths::ModuleForAddress(caller);
-    request.caller = paths::ModuleNameForAddress(caller);
-    switch (kernels::Decide(blob, size, request, t_module)) {
+    const kernels::Request request =
+        kernels::Request::From(kernels::kRouteD3D12, ODG_RETURN_ADDRESS());
+    kernels::Substitution substitution;
+    switch (kernels::Decide(blob, size, request, substitution)) {
     case kernels::Decision::Unchanged:
         return original(device, blob, size, out_module);
     case kernels::Decision::Refused:
@@ -280,18 +283,11 @@ uint32_t __cdecl HookedCreateCuModule(void* device, const void* blob, uint32_t s
     case kernels::Decision::Substituted:
         break;
     }
-
-    const auto create = [&] {
-        return original(device, t_module.data(), static_cast<uint32_t>(t_module.size()),
-                        out_module);
-    };
-    uint32_t status = create();
-    // A driver that refuses the first choice may accept one built from a
-    // nearer architecture, which is the same second chance the other routes get.
-    if (status != 0 && kernels::Fallback(blob, size, status, request, t_module))
-        status = create();
-    kernels::ReportDriverResult(status, kernels::kRouteD3D12);
-    return status;
+    return kernels::CreateSubstituted(blob, size, request, substitution,
+                             [&](const std::vector<uint8_t>& image) {
+                                 return original(device, image.data(),
+                                                 static_cast<uint32_t>(image.size()), out_module);
+                             });
 }
 
 // A kernel the runtime cannot resolve in the substituted module is the

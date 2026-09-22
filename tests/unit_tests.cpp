@@ -229,23 +229,39 @@ void TestPtxSource() {
     Activate(kNvApiAmpere, 2);
     Request request;
     request.route = "test";
-    CHECK(Decide(both.data(), both.size(), request, out) == Decision::Substituted);
-    CHECK(Describe(out.data(), out.size(), images));
-    CHECK(Fallback(both.data(), both.size(), 1, request, out));
-    CHECK(Describe(out.data(), out.size(), images) && images.size() == 1);
-    const std::string closest_text(reinterpret_cast<const char*>(out.data()) +
-                                       images[0].payload_offset,
-                                   images[0].payload_size);
+    Substitution substitution;
+    CHECK(Decide(both.data(), both.size(), request, substitution) == Decision::Substituted);
+    CHECK(substitution.source_arch == 120);
+    CHECK(Describe(substitution.image.data(), substitution.image.size(), images));
+    CHECK(Fallback(both.data(), both.size(), 1, request, substitution));
+    CHECK(substitution.source_arch == 89);
+    CHECK(Describe(substitution.image.data(), substitution.image.size(), images) &&
+          images.size() == 1);
+    const std::string closest_text(
+        reinterpret_cast<const char*>(substitution.image.data()) + images[0].payload_offset,
+        images[0].payload_size);
     CHECK(closest_text.find("0f3F000000") != std::string::npos);
-    CHECK(!Fallback(both.data(), both.size(), 1, request, out)); // only once
+    CHECK(!Fallback(both.data(), both.size(), 1, request, substitution)); // only once
+
+    // The driver is called through the same path on every route: a refusal of
+    // the newest source is retried once from the closest.
+    Substitution retried;
+    CHECK(Decide(both.data(), both.size(), request, retried) == Decision::Substituted);
+    std::vector<uint32_t> tried;
+    const int status = CreateSubstituted(both.data(), both.size(), request, retried,
+                                         [&](const std::vector<uint8_t>&) {
+                                             tried.push_back(retried.source_arch);
+                                             return tried.size() == 1 ? -1 : 0;
+                                         });
+    CHECK(status == 0 && tried.size() == 2 && tried[0] == 120 && tried[1] == 89);
 
     // With retargeting switched off, an image this GPU cannot run is refused
     // rather than handed to the driver, and a runnable one still passes.
     options.enabled = false;
     Configure(options);
-    CHECK(Decide(both.data(), both.size(), request, out) == Decision::Refused);
+    CHECK(Decide(both.data(), both.size(), request, substitution) == Decision::Refused);
     const std::vector<uint8_t> ampere = MakeContainer(80, PtxFor(80));
-    CHECK(Decide(ampere.data(), ampere.size(), request, out) == Decision::Unchanged);
+    CHECK(Decide(ampere.data(), ampere.size(), request, substitution) == Decision::Unchanged);
     options.enabled = true;
     Configure(options);
 
