@@ -63,7 +63,8 @@ like this, and both reach 4x with `ForceMultiplier=4`.
 It never switches frame generation on. With the game's own setting off, nothing
 is forced. If the runtime refuses the count, the game's own request is sent
 again so it keeps the frame generation it asked for, and the log records
-`dlssg_force_rejected`.
+`dlssg_force_rejected`. A game built against a newer Streamline than this
+release knows is not forced at all, and the log records `dlssg_force_skipped`.
 
 ### `[Compatibility]`
 

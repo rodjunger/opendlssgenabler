@@ -22,6 +22,7 @@ std::atomic<PFun_slDLSSGSetOptions*> g_set_options{nullptr};
 std::atomic<PFun_slDLSSGGetState*> g_get_state{nullptr};
 std::atomic<uint64_t> g_set_calls{0};
 std::atomic<uint64_t> g_last_request{UINT64_MAX};
+std::atomic<bool> g_newer_options_reported{false};
 
 const char* ModeName(sl::DLSSGMode mode) {
     switch (mode) {
@@ -168,6 +169,20 @@ sl::Result HookSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
                 LogState(viewport, &options, "after_set");
         }
         return result;
+    }
+
+    // The copy below is this build's struct. A game built against a newer SDK
+    // passes fields it does not have, and Streamline would read them past the
+    // end of the copy, so such a request is passed through as the game made it.
+    static const uint32_t kKnownVersion = sl::DLSSGOptions{}.structVersion;
+    if (options.structVersion > kKnownVersion) {
+        if (!g_newer_options_reported.exchange(true))
+            log::Event(log::Level::Warning, "dlssg_force_skipped",
+                       {log::Field::Uint("struct_version", options.structVersion),
+                        log::Field::Uint("known_version", kKnownVersion),
+                        log::Field::Str("note", "the game's Streamline is newer than this build; "
+                                                "its own multiplier is used")});
+        return original(viewport, options);
     }
 
     sl::DLSSGOptions adjusted = CopyKnownOptions(options);
