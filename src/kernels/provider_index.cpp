@@ -13,9 +13,11 @@
 #include <span>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace odg::kernels {
@@ -24,10 +26,6 @@ namespace {
 // FATBIN_MAGIC and the ELF magic, as they appear in memory.
 constexpr auto kFatbinMagic = hat::compile_signature<"50 ED 55 BA">();
 constexpr auto kElfMagic = hat::compile_signature<"7F 45 4C 46">();
-
-// A cubin inside a container is found by a hash of its opening bytes. Length is
-// deliberately left out: the runtime rounds the length it passes up.
-constexpr size_t kFingerprintBytes = 512;
 
 // 64-bit FNV-1a.
 constexpr uint64_t kFnvBasis = 1469598103934665603ull;
@@ -69,8 +67,15 @@ uint64_t Hash(std::span<const uint8_t> bytes, uint64_t hash = kFnvBasis) {
     return hash;
 }
 
-uint64_t Fingerprint(const uint8_t* bytes, size_t size) {
-    return Hash({bytes, std::min(size, kFingerprintBytes)});
+// A cubin inside a container is found by a hash of the whole image. Its length
+// is the one its own headers state: the runtime rounds the length it passes up.
+// Only the image's opening bytes are not enough; two builds of one kernel share
+// their name tables, and 310.5 through 310.7 hold such pairs within 512 bytes.
+std::optional<uint64_t> Fingerprint(const uint8_t* bytes, size_t available) {
+    const size_t size = CubinSize(bytes, available);
+    if (!size)
+        return std::nullopt;
+    return Hash({bytes, size});
 }
 
 uint64_t VariantKey(const std::string& name, uint64_t code) {
@@ -149,9 +154,9 @@ void ReleaseClaim(HMODULE provider) {
 
 } // namespace
 
-void BuildProviderIndex(HMODULE provider) {
+std::optional<IndexSummary> BuildProviderIndex(HMODULE provider) {
     if (!provider || !ClaimIndex(provider))
-        return;
+        return std::nullopt;
     // The index is pointers into the runtime's mapped image, and NGX unloads a
     // runtime it has replaced. The caller pins before it hands the module over;
     // this is the second belt, because everything below stores raw pointers.
@@ -159,6 +164,9 @@ void BuildProviderIndex(HMODULE provider) {
 
     std::vector<Blob> containers;
     std::unordered_map<uint64_t, Blob> contained;
+    // The same image in two containers could be answered from either, which
+    // is a guess, so such a key answers nothing.
+    std::unordered_set<uint64_t> ambiguous;
     ForEachMatch(provider, kFatbinMagic, [&](const uint8_t* blob, size_t available) -> size_t {
         const size_t total = ContainerSize(blob, available);
         std::vector<Image> images;
@@ -166,12 +174,19 @@ void BuildProviderIndex(HMODULE provider) {
             return 0;
         containers.push_back(Blob{blob, total});
         for (const Image& image : images) {
-            if (!image.is_ptx && !image.compressed)
-                contained[Fingerprint(blob + image.payload_offset, image.payload_size)] =
-                    Blob{blob, total};
+            if (image.is_ptx || image.compressed)
+                continue;
+            const auto key = Fingerprint(blob + image.payload_offset, image.payload_size);
+            if (!key)
+                continue;
+            const auto [entry, added] = contained.try_emplace(*key, Blob{blob, total});
+            if (!added && entry->second.data != blob)
+                ambiguous.insert(*key);
         }
         return total;
     });
+    for (const uint64_t key : ambiguous)
+        contained.erase(key);
 
     const auto inside_container = [&](const uint8_t* address) {
         return std::any_of(containers.begin(), containers.end(), [&](const Blob& span) {
@@ -203,11 +218,14 @@ void BuildProviderIndex(HMODULE provider) {
         index.variants = std::move(variants);
         ReleaseClaim(provider);
     }
+    const IndexSummary summary{containers.size(), cubins, paired, ambiguous.size()};
     log::Event(log::Level::Info, "provider_index_built",
                {log::Field::Path("provider", paths::ModulePath(provider).c_str()),
-                log::Field::Uint("containers", containers.size()),
-                log::Field::Uint("cubins", cubins),
-                log::Field::Uint("kernels_with_alternatives", paired)});
+                log::Field::Uint("containers", summary.containers),
+                log::Field::Uint("ambiguous_images", summary.ambiguous_images),
+                log::Field::Uint("cubins", summary.cubins),
+                log::Field::Uint("kernels_with_alternatives", summary.kernels_with_alternatives)});
+    return summary;
 }
 
 bool ProviderIndexed(HMODULE provider) {
@@ -246,13 +264,15 @@ const void* FindContainerForCubin(HMODULE provider, const void* cubin, size_t si
     container_size = 0;
     if (!provider || !cubin || !size)
         return nullptr;
-    const uint64_t key = Fingerprint(static_cast<const uint8_t*>(cubin), size);
+    const auto key = Fingerprint(static_cast<const uint8_t*>(cubin), size);
+    if (!key)
+        return nullptr;
 
     std::lock_guard<std::mutex> lock(g_mutex);
     const auto indexed = g_indexes.find(provider);
     if (indexed == g_indexes.end())
         return nullptr;
-    const auto found = indexed->second.containers.find(key);
+    const auto found = indexed->second.containers.find(*key);
     if (found == indexed->second.containers.end())
         return nullptr;
     container_size = found->second.size;
