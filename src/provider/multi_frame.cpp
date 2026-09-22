@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
-#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
@@ -36,22 +35,6 @@ constexpr size_t kMaxParameterLength = 64;
 constexpr int kInstructionsToPublication = 8;
 
 std::atomic<bool> g_enabled{true};
-
-// Patched once per runtime rather than once per process: a game's own runtime
-// and one NGX downloaded in its place can both be mapped, and the gates have to
-// be moved in whichever of them creates the feature.
-std::mutex g_unlocked_mutex;
-std::vector<HMODULE> g_unlocked;
-
-// Returns false when this runtime has already been claimed, so its gates are
-// read and rewritten once however many times it is offered.
-bool ClaimUnlock(HMODULE provider) {
-    std::lock_guard lock(g_unlocked_mutex);
-    if (std::find(g_unlocked.begin(), g_unlocked.end(), provider) != g_unlocked.end())
-        return false;
-    g_unlocked.push_back(provider);
-    return true;
-}
 
 // `cmp r32, imm32` against Blackwell's id, in its two encodings:
 //   3D id          cmp eax, imm32
@@ -146,7 +129,7 @@ bool MultiFrameEnabled() {
 }
 
 void UnlockMultiFrame(HMODULE provider, bool at_load) {
-    if (!provider || !MultiFrameEnabled() || !ClaimUnlock(provider))
+    if (!provider || !MultiFrameEnabled())
         return;
     const auto gates = FindMultiFrameGates(provider);
     const auto unlocked = std::count_if(gates.begin(), gates.end(),

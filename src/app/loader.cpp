@@ -48,9 +48,15 @@ std::atomic<bool> g_vulkan_hooks{false};
 // Every DLSS-G runtime this process has mapped, in the order they arrived.
 // A driver profile with the DLSS override enabled makes NGX load a runtime of
 // its own beside the one the game ships, and the kernels come from whichever it
-// picked, so both are prepared and both are indexed.
+// picked, so both are prepared and both are indexed. This list is the one
+// record of which runtimes exist and what has been done to each; the code that
+// patches and indexes them keeps none of its own.
+struct Runtime {
+    HMODULE module = nullptr;
+    bool gates_claimed = false; // multi-frame gates rewritten, or being rewritten
+};
 std::mutex g_runtimes_mutex;
-std::vector<HMODULE> g_runtimes;
+std::vector<Runtime> g_runtimes;
 std::atomic<int> g_nvapi_attempts{0};
 HANDLE g_wake = nullptr;
 
@@ -68,23 +74,30 @@ bool NamesRuntime(LPCWSTR file_name) {
                                                         kRuntimeName);
 }
 
-// Records a runtime and returns false when it was already known, so each is
-// prepared once. NGX unloads a runtime once it has read what it wanted from it,
-// and this handle is kept and re-examined on every rescan, so it is pinned
-// first. Pinning before the lock is taken, rather than under it, keeps this
-// engine's lock off the path to the loader lock: PinModule takes the loader
-// lock, and this function itself runs under it, inside the LoadLibraryExW hook.
-bool Known(HMODULE module) {
-    std::lock_guard lock(g_runtimes_mutex);
-    return std::find(g_runtimes.begin(), g_runtimes.end(), module) != g_runtimes.end();
+// The record for `module`. Called with g_runtimes_mutex held.
+Runtime* Find(HMODULE module) {
+    for (Runtime& runtime : g_runtimes) {
+        if (runtime.module == module)
+            return &runtime;
+    }
+    return nullptr;
 }
 
+bool Known(HMODULE module) {
+    std::lock_guard lock(g_runtimes_mutex);
+    return Find(module) != nullptr;
+}
+
+// Records a runtime and returns false when it was already known, so each is
+// prepared once. NGX unloads a runtime once it has read what it wanted from it,
+// and this handle is kept and re-examined on every rescan, and the index points
+// into its image, so it is pinned before it is recorded. Pinning takes the
+// loader lock, and a load made from inside another DLL's DllMain reaches here
+// holding it already, so the pin is taken outside this engine's lock rather
+// than under it, which would invert the two.
 bool RecordRuntime(HMODULE module) {
     if (!module || Known(module))
         return false;
-    // Pinned outside the lock, because PinModule takes the loader lock and this
-    // function itself runs under it, inside the LoadLibraryExW hook. Holding
-    // this engine's lock across that acquisition would invert the two.
     if (!paths::PinModule(module)) {
         // The handle was stale, or the loader refused. Either way the image
         // cannot be relied on to stay mapped, so it is left alone rather than
@@ -95,15 +108,29 @@ bool RecordRuntime(HMODULE module) {
         return false;
     }
     std::lock_guard lock(g_runtimes_mutex);
-    if (std::find(g_runtimes.begin(), g_runtimes.end(), module) != g_runtimes.end())
+    if (Find(module))
         return false;
-    g_runtimes.push_back(module);
+    g_runtimes.push_back(Runtime{module});
     return true;
 }
 
 std::vector<HMODULE> KnownRuntimes() {
     std::lock_guard lock(g_runtimes_mutex);
-    return g_runtimes;
+    std::vector<HMODULE> modules;
+    for (const Runtime& runtime : g_runtimes)
+        modules.push_back(runtime.module);
+    return modules;
+}
+
+// True for exactly one caller per runtime: the load hook and the worker can
+// both reach a new runtime at once, and its gates are rewritten only once.
+bool ClaimGates(HMODULE module) {
+    std::lock_guard lock(g_runtimes_mutex);
+    Runtime* runtime = Find(module);
+    if (!runtime || runtime->gates_claimed)
+        return false;
+    runtime->gates_claimed = true;
+    return true;
 }
 
 // Experimental: loads the configured runtime in place of whichever one is being
@@ -143,11 +170,12 @@ void ReportProvider(HMODULE module) {
 // Multi-frame generation is unlocked only on a GPU this engine enables. On a
 // GPU that runs DLSS-G natively the gates are NVIDIA's decision to keep: moving
 // them on Ada would switch on multi-frame paths whose kernels Ada does not have.
-// UnlockMultiFrame acts once per runtime, so this is safe to call on every scan.
+// Each runtime is claimed once, so this is safe to call on every scan.
 void MaybeUnlockMultiFrame(HMODULE module, bool at_load) {
     switch (spoof::nvapi::RealArchitecture()) {
     case spoof::nvapi::Architecture::Supported:
-        provider::UnlockMultiFrame(module, at_load);
+        if (ClaimGates(module))
+            provider::UnlockMultiFrame(module, at_load);
         break;
     case spoof::nvapi::Architecture::Unknown:
         // Streamline asks the architecture long before the runtime loads, so
@@ -256,8 +284,10 @@ void ReportNvidiaModules() {
 }
 
 // The runtime publishes its capabilities as soon as NGX asks, which can happen
-// before the worker wakes. Rewriting a few bytes suspends no other thread, so
-// unlike installing a hook it is safe here, inside the load.
+// before the worker wakes, so its gates are moved here, on the loading thread,
+// before LoadLibraryExW returns to the caller. Rewriting a few bytes suspends no
+// other thread, so unlike installing a hook this is safe even when the load is
+// nested inside another DLL's DllMain.
 void PrepareRuntime(HMODULE module) {
     if (!provider::IsDlssgProvider(module) || !RecordRuntime(module))
         return;

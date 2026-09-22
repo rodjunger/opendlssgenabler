@@ -48,8 +48,9 @@ std::vector<Gate> FindMultiFrameGates(HMODULE provider);
 void SetMultiFrameEnabled(bool enabled);
 bool MultiFrameEnabled();
 
-// Rewrites the gates once per runtime. `at_load` records whether this ran
-// inside the load, before any of the runtime's code could run.
+// Rewrites the gates in `provider`. The caller has pinned it and calls this
+// once per runtime. `at_load` records whether this ran inside the load, before
+// the caller could reach any of the runtime's code.
 void UnlockMultiFrame(HMODULE provider, bool at_load);
 
 } // namespace odg::provider

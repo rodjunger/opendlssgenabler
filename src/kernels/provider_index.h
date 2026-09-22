@@ -23,15 +23,15 @@ namespace odg::kernels {
 // the DLSS override. Each runtime is therefore indexed on its own and answers
 // only for the kernels it created. An image from one build is not a replacement
 // for a kernel of another, and the driver refuses it as an invalid image.
-// Indexing pins the module, so the images stay mapped for as long as they can
-// be handed to the driver.
+// The index points into the image, so the caller pins the module first, and
+// builds each index from one thread: the loader's worker.
 struct IndexSummary {
     size_t containers = 0;
     size_t cubins = 0;                    // outside any container
     size_t kernels_with_alternatives = 0; // with a cubin for more than one architecture
     size_t ambiguous_images = 0;          // in two containers, so answering nothing
 };
-// Empty when the runtime was already indexed or is being indexed elsewhere.
+// Empty when the runtime was already indexed.
 std::optional<IndexSummary> BuildProviderIndex(HMODULE provider);
 
 // Whether this runtime has been indexed. A runtime that has not been cannot be

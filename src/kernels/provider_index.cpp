@@ -133,34 +133,11 @@ void ForEachMatch(HMODULE provider, const Signature& magic, Visit&& visit) {
     }
 }
 
-// Runtimes whose walk is under way. Claiming one before the walk, rather than
-// registering it after, keeps two threads from both walking the same image and
-// one of them throwing the other's result away.
-std::vector<HMODULE> g_building;
-
-bool ClaimIndex(HMODULE provider) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_indexes.count(provider) != 0 ||
-        std::find(g_building.begin(), g_building.end(), provider) != g_building.end())
-        return false;
-    g_building.push_back(provider);
-    return true;
-}
-
-void ReleaseClaim(HMODULE provider) {
-    g_building.erase(std::remove(g_building.begin(), g_building.end(), provider),
-                     g_building.end());
-}
-
 } // namespace
 
 std::optional<IndexSummary> BuildProviderIndex(HMODULE provider) {
-    if (!provider || !ClaimIndex(provider))
+    if (!provider || ProviderIndexed(provider))
         return std::nullopt;
-    // The index is pointers into the runtime's mapped image, and NGX unloads a
-    // runtime it has replaced. The caller pins before it hands the module over;
-    // this is the second belt, because everything below stores raw pointers.
-    paths::PinModule(provider);
 
     std::vector<Blob> containers;
     std::unordered_map<uint64_t, Blob> contained;
@@ -213,10 +190,7 @@ std::optional<IndexSummary> BuildProviderIndex(HMODULE provider) {
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        Index& index = g_indexes[provider];
-        index.containers = std::move(contained);
-        index.variants = std::move(variants);
-        ReleaseClaim(provider);
+        g_indexes.try_emplace(provider, Index{std::move(contained), std::move(variants)});
     }
     const IndexSummary summary{containers.size(), cubins, paired, ambiguous.size()};
     log::Event(log::Level::Info, "provider_index_built",
