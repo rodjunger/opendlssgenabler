@@ -171,7 +171,9 @@ bool InstallVulkanHooks() {
     if (!device || !instance) {
         // Attempted once: a hook that fails to install on a loaded, pinned
         // loader will not start working.
-        log::Event(log::Level::Warning, "vulkan_hooks_unavailable",
+        // An unhooked resolver can hand out the extension function unwrapped,
+        // so this is a failure even when the other one works.
+        log::Event(log::Level::Error, "vulkan_hooks_unavailable",
                    {log::Field::Bool("device_resolver", device),
                     log::Field::Bool("instance_resolver", instance),
                     log::Field::Str("note", "the Vulkan loader could not be fully hooked. "

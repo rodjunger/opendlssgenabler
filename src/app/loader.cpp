@@ -53,7 +53,7 @@ std::atomic<bool> g_vulkan_hooks{false};
 // patches and indexes them keeps none of its own.
 struct Runtime {
     HMODULE module = nullptr;
-    bool gates_claimed = false; // multi-frame gates rewritten, or being rewritten
+    bool gates_claimed = false; // multi-frame unlock attempted, or under way
 };
 std::mutex g_runtimes_mutex;
 std::vector<Runtime> g_runtimes;
@@ -123,7 +123,8 @@ std::vector<HMODULE> KnownRuntimes() {
 }
 
 // True for exactly one caller per runtime: the load hook and the worker can
-// both reach a new runtime at once, and its gates are rewritten only once.
+// both reach a new runtime at once, and its gates are rewritten only once. The
+// caller that loses returns at once, without waiting for the winner to finish.
 bool ClaimGates(HMODULE module) {
     std::lock_guard lock(g_runtimes_mutex);
     Runtime* runtime = Find(module);
@@ -285,13 +286,21 @@ void ReportNvidiaModules() {
 
 // The runtime publishes its capabilities as soon as NGX asks, which can happen
 // before the worker wakes, so its gates are moved here, on the loading thread,
-// before LoadLibraryExW returns to the caller. Rewriting a few bytes suspends no
-// other thread, so unlike installing a hook this is safe even when the load is
-// nested inside another DLL's DllMain.
+// before LoadLibraryExW returns to the caller, unless the worker has already
+// claimed them; `at_load` in multi_frame_unlocked says which. Rewriting a few
+// bytes suspends no other thread, so unlike installing a hook this is safe even
+// when the load is nested inside another DLL's DllMain.
 void PrepareRuntime(HMODULE module) {
-    if (!provider::IsDlssgProvider(module) || !RecordRuntime(module))
+    if (!provider::IsDlssgProvider(module))
         return;
-    MaybeUnlockMultiFrame(module, true);
+    // The worker may have found the module first, woken by a library the
+    // runtime pulled in while it was loading, so already knowing it is not a
+    // reason to stop: the gates are claimed separately, and whichever of the
+    // two claims first moves them. A pin that failed leaves the module unknown,
+    // and nothing is moved.
+    RecordRuntime(module);
+    if (Known(module))
+        MaybeUnlockMultiFrame(module, true);
 }
 
 // Otherwise does the minimum the loader lock allows: wakes the worker. On

@@ -24,7 +24,8 @@ namespace odg::kernels {
 // only for the kernels it created. An image from one build is not a replacement
 // for a kernel of another, and the driver refuses it as an invalid image.
 // The index points into the image, so the caller pins the module first, and
-// builds each index from one thread: the loader's worker.
+// builds indexes one at a time: from the loader's worker, or from Start before
+// the worker exists.
 struct IndexSummary {
     size_t containers = 0;
     size_t cubins = 0;                    // outside any container

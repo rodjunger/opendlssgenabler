@@ -124,7 +124,9 @@ an Ada-only call that removes the device on older hardware.
 Supplies kernels this GPU can run: NVIDIA's own Ampere build where the runtime
 carries one, otherwise its PTX retargeted to this GPU. Without it frame
 generation is offered and then has nothing to execute. `0` is a diagnostic, and
-the log will fill with refusals.
+the log will fill with refusals: every image this GPU cannot run is still found
+and refused rather than handed to the driver, so the CUDA driver is still asked
+which GPU this is.
 
 **`TargetSM`** (default `0`, otherwise `50` to `200`)
 The architecture to build kernels for, as an SM number such as `86`. `0` asks the

@@ -336,6 +336,13 @@ while NGX unloads a runtime it has replaced; without the pin, either read can
 land on an image that is no longer there. A runtime that cannot be pinned is not
 indexed at all.
 
+A cubin with no native twin is retargeted from the container it came from,
+found by a hash of the whole cubin. An image that appears in two containers
+could be answered from either, so it answers nothing; `provider_index_built`
+counts these as `ambiguous_images`. None of the runtimes checked so far has one,
+so a non-zero count on a new build is worth reporting, and `patchprobe` shows it
+without a game.
+
 ### Two routes to the driver
 
 | API | Entry point | How it is reached |

@@ -231,6 +231,9 @@ void SetPatchesEnabled(bool flip_metering, bool frame_clamp) {
     g_clamp_enabled.store(frame_clamp, std::memory_order_release);
 }
 
+// Called only from InspectLoadedModules, which runs on one thread at a time.
+// The check and the record below are separate lock scopes, so a second,
+// concurrent caller would need them joined first.
 void PatchPlugin(HMODULE plugin) {
     if (!plugin)
         return;
