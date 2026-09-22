@@ -15,10 +15,6 @@ namespace odg::pe {
 // Empty when `module` is not a loaded image.
 std::vector<std::span<const std::byte>> ReadableSections(HMODULE module);
 
-// The loaded module containing `address`, or null for memory outside any image,
-// such as code another tool allocated.
-HMODULE ModuleOf(const void* address);
-
 // Overwrites code after switching the page to writable and flushing the
 // instruction cache. Restores the previous protection on success. Code is mapped
 // read-only, so it is addressed as const like everywhere else it is read.

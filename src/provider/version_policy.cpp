@@ -1,5 +1,7 @@
 #include "provider/version_policy.h"
 
+#include "core/paths.h"
+
 #include <winver.h>
 
 #include <array>
@@ -39,13 +41,7 @@ struct VersionApi {
 const VersionApi& Api() {
     static const VersionApi api = [] {
         VersionApi a;
-        wchar_t system_dir[MAX_PATH];
-        const UINT length = GetSystemDirectoryW(system_dir, MAX_PATH);
-        if (length == 0 || length >= MAX_PATH)
-            return a;
-        std::wstring path(system_dir, length);
-        path += L"\\version.dll";
-        HMODULE module = LoadLibraryW(path.c_str());
+        HMODULE module = paths::LoadSystemLibrary(L"version.dll");
         if (!module)
             return a;
         a.get_size = reinterpret_cast<PfnGetSize>(GetProcAddress(module, "GetFileVersionInfoSizeW"));

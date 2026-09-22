@@ -51,10 +51,6 @@ constexpr size_t kMaxContainerSize = 256u << 20;
 // nvcc aligns every payload to 8 bytes.
 constexpr size_t kPayloadAlignment = 8;
 
-std::span<const uint8_t> View(const void* blob, size_t size) {
-    return blob ? std::span(static_cast<const uint8_t*>(blob), size) : std::span<const uint8_t>{};
-}
-
 // A container can be recognised from its header alone, which is all a caller
 // has when it is probing a pointer whose length it does not yet know.
 std::optional<FileHeader> ContainerHeader(std::span<const uint8_t> data) {
@@ -159,13 +155,13 @@ bool CanRun(bool is_ptx, uint32_t image, uint32_t device) {
 }
 
 size_t ContainerSize(const void* blob, size_t size) {
-    const auto header = ContainerHeader(View(blob, size));
+    const auto header = ContainerHeader(bytes::View(blob, size));
     return header ? header->header_size + static_cast<size_t>(header->fat_size) : 0;
 }
 
 bool Describe(const void* blob, size_t size, std::vector<Image>& images) {
     images.clear();
-    const auto container = View(blob, size);
+    const auto container = bytes::View(blob, size);
     const auto header = ContainerHeader(container);
     // The header states its own length, so a caller's `size` can be shorter
     // than it; checked first, or the subtraction below wraps.
@@ -201,7 +197,7 @@ bool Retarget(const void* blob, size_t size, uint32_t arch, std::vector<uint8_t>
     std::vector<Image> images;
     if (!Describe(blob, size, images))
         return false;
-    const auto container = View(blob, size);
+    const auto container = bytes::View(blob, size);
 
     report.images = static_cast<uint32_t>(images.size());
     std::vector<const Image*> candidates;

@@ -9,6 +9,16 @@
 #include <string_view>
 
 namespace odg::paths {
+namespace {
+
+// The last segment of a path: the file name, or the whole path when it has no
+// directory.
+std::wstring_view Leaf(std::wstring_view path) {
+    const size_t separator = path.find_last_of(L"\\/");
+    return separator == std::wstring_view::npos ? path : path.substr(separator + 1);
+}
+
+} // namespace
 
 std::wstring ModulePath(HMODULE module) {
     std::wstring path(MAX_PATH, L'\0');
@@ -26,9 +36,7 @@ std::wstring ModulePath(HMODULE module) {
 }
 
 std::wstring ModuleFileName(HMODULE module) {
-    const std::wstring path = ModulePath(module);
-    const size_t separator = path.find_last_of(L"\\/");
-    return separator == std::wstring::npos ? path : path.substr(separator + 1);
+    return std::wstring(Leaf(ModulePath(module)));
 }
 
 std::wstring ParentDirectory(const std::wstring& path) {
@@ -37,10 +45,19 @@ std::wstring ParentDirectory(const std::wstring& path) {
 }
 
 bool FileNameEqualsInsensitive(const std::wstring& path, const wchar_t* name) {
-    const size_t separator = path.find_last_of(L"\\/");
-    const wchar_t* leaf = separator == std::wstring::npos ? path.c_str()
-                                                          : path.c_str() + separator + 1;
-    return name && _wcsicmp(leaf, name) == 0;
+    // The leaf runs to the end of `path`, so it is still NUL-terminated.
+    return name && _wcsicmp(Leaf(path).data(), name) == 0;
+}
+
+HMODULE LoadSystemLibrary(const wchar_t* name) {
+    wchar_t directory[MAX_PATH];
+    const UINT length = GetSystemDirectoryW(directory, MAX_PATH);
+    if (!name || length == 0 || length >= MAX_PATH)
+        return nullptr;
+    std::wstring path(directory, length);
+    path += L'\\';
+    path += name;
+    return LoadLibraryW(path.c_str());
 }
 
 namespace {
@@ -96,8 +113,7 @@ std::wstring ComponentFileName(const std::wstring& path) {
             _wcsnicmp(directory.data(), component.directory, directory.size()) == 0)
             return component.module;
     }
-    const size_t separator = path.find_last_of(L"\\/");
-    return separator == std::wstring::npos ? path : path.substr(separator + 1);
+    return std::wstring(Leaf(path));
 }
 
 std::vector<HMODULE> LoadedComponents(const wchar_t* module_name) {

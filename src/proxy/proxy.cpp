@@ -1,10 +1,8 @@
 #include "proxy/proxy.h"
 
-#include "core/log.h"
+#include "core/paths.h"
 
 #include <windows.h>
-
-#include <string>
 
 namespace odg::proxy {
 namespace {
@@ -14,16 +12,7 @@ BindResult g_last_bind;
 bool Bind(const wchar_t* real_dll, const Export* exports, size_t count) {
     g_last_bind = {real_dll, 0, count, true};
 
-    wchar_t system_dir[MAX_PATH];
-    const UINT length = GetSystemDirectoryW(system_dir, MAX_PATH);
-    if (length == 0 || length >= MAX_PATH)
-        return false;
-
-    std::wstring path(system_dir, length);
-    path += L'\\';
-    path += real_dll;
-
-    HMODULE real = LoadLibraryW(path.c_str());
+    HMODULE real = paths::LoadSystemLibrary(real_dll);
     if (!real)
         return false;
 

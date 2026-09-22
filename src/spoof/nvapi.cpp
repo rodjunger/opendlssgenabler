@@ -110,11 +110,8 @@ bool CallerIsSpoofed(const void* return_address) {
     if (everyone)
         return true;
 
-    HMODULE module = nullptr;
-    if (!return_address ||
-        !GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            static_cast<LPCWSTR>(return_address), &module))
+    const HMODULE module = paths::ModuleForAddress(return_address);
+    if (!module)
         return false;
     // The component this module is, not the file name it happens to carry: NGX
     // downloads replacement plugins under a name that identifies nothing, and a
