@@ -571,6 +571,10 @@ void TestPathRedaction() {
     CHECK(elsewhere.token.find("Program Files") != std::string::npos);
     CHECK(elsewhere.token.find("%USERPROFILE%") == std::string::npos);
     CHECK(odg::log::Field::Path("path", nullptr).token == "\"\"");
+    // Another account whose name starts with this one's is not under it.
+    const odg::log::Field sibling =
+        odg::log::Field::Path("path", L"C:\\Users\\somebody2\\x.dll");
+    CHECK(sibling.token.find("%USERPROFILE%") == std::string::npos);
 }
 
 void TestComponentName() {
