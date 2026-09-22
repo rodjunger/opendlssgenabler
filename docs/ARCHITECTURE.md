@@ -234,6 +234,12 @@ built from that store finds the opposite writes. `patchprobe` prints the result
 for any `sl.dlss_g.dll` without running a game, which is the first thing to check
 on a new plugin build.
 
+Every mapped copy of the plugin is patched, the game's and any NGX downloaded,
+and each is pinned before it is read. Streamline can unload the copy it did not
+choose, and a scan of an image that is unmapped underneath it would fault in the
+game. A plugin that cannot be pinned is left alone, logged as
+`plugin_pin_failed`.
+
 ## Gate 4: kernels
 
 ### Why nothing can run

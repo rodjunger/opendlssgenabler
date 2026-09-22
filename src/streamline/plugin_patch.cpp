@@ -66,6 +66,15 @@ std::atomic<bool> g_flip_enabled{true};
 std::atomic<bool> g_clamp_enabled{false};
 std::atomic<int> g_flip_value{-1};
 
+// The record for `plugin`, or null. Called with g_patched_lock held.
+PatchedPlugin* Find(HMODULE plugin) {
+    for (PatchedPlugin& candidate : g_patched) {
+        if (candidate.module == plugin)
+            return &candidate;
+    }
+    return nullptr;
+}
+
 // `mov byte ptr [reg + displacement], value`, as a signature:
 //   C6        mov r/m8, imm8
 //   10000???  ModRM with mod 10 (32-bit displacement) and reg 000 (mov);
@@ -224,22 +233,34 @@ void PatchPlugin(HMODULE plugin) {
         return;
 
     AcquireSRWLockExclusive(&g_patched_lock);
-    PatchedPlugin* record = nullptr;
-    for (PatchedPlugin& candidate : g_patched) {
-        if (candidate.module == plugin)
-            record = &candidate;
-    }
-    if (!record)
-        record = &g_patched.emplace_back(PatchedPlugin{plugin, false, false});
-
-    const bool flip = g_flip_enabled.load(std::memory_order_acquire) && !record->flip_metering;
-    const bool clamp = g_clamp_enabled.load(std::memory_order_acquire) && !record->frame_clamp;
-    record->flip_metering = record->flip_metering || flip;
-    record->frame_clamp = record->frame_clamp || clamp;
+    const PatchedPlugin* record = Find(plugin);
+    const bool flip = g_flip_enabled.load(std::memory_order_acquire) &&
+                      !(record && record->flip_metering);
+    const bool clamp = g_clamp_enabled.load(std::memory_order_acquire) &&
+                       !(record && record->frame_clamp);
     ReleaseSRWLockExclusive(&g_patched_lock);
-
     if (!flip && !clamp)
         return;
+
+    // Streamline can unload a plugin it did not choose, and the image is read
+    // and patched directly below. Pinned first, outside the lock because
+    // pinning takes the loader lock, so the image cannot go away underneath
+    // the scan, and so a handle recorded here can never name a different
+    // module later.
+    if (!paths::PinModule(plugin)) {
+        log::Event(log::Level::Warning, "plugin_pin_failed",
+                   {log::Field::Str("note", "plugin not patched; it may already be unloaded")});
+        return;
+    }
+
+    AcquireSRWLockExclusive(&g_patched_lock);
+    PatchedPlugin* done = Find(plugin);
+    if (!done)
+        done = &g_patched.emplace_back(PatchedPlugin{plugin, false, false});
+    done->flip_metering = done->flip_metering || flip;
+    done->frame_clamp = done->frame_clamp || clamp;
+    ReleaseSRWLockExclusive(&g_patched_lock);
+
     const std::wstring path = paths::ModulePath(plugin);
     const PluginAnalysis analysis = AnalyzePlugin(plugin);
     if (flip)
