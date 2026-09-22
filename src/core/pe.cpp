@@ -67,19 +67,13 @@ bool RangeReadable(const void* address, size_t size) {
 bool SafeCopy(void* destination, const void* source, size_t size) {
     if (!destination || !source || size == 0)
         return false;
-#ifdef _MSC_VER
-    __try {
-        std::memcpy(destination, source, size);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-#else
+    // Checked rather than caught: the MinGW toolchains have no structured
+    // exception handling for C++. The range can in principle change between
+    // the check and the copy, which nothing this reads does in practice.
     if (!RangeReadable(source, size))
         return false;
     std::memcpy(destination, source, size);
     return true;
-#endif
 }
 
 void* ResolveJumpThunk(void* address) {

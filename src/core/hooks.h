@@ -6,12 +6,7 @@
 
 // The return address of the current function, used to tell which module made a
 // call into a hook.
-#if defined(_MSC_VER)
-#include <intrin.h>
-#define ODG_RETURN_ADDRESS() _ReturnAddress()
-#else
 #define ODG_RETURN_ADDRESS() __builtin_return_address(0)
-#endif
 
 // Inline hooks, on top of MinHook.
 //

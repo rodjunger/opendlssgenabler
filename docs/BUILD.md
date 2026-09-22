@@ -72,8 +72,8 @@ python3 tools/gen_proxy.py version /mnt/c/Windows/System32/version.dll
 
 Regenerate them only to add a proxy name.
 
-## Native Windows (MSVC)
+## Native Windows
 
-The CMake project has MSVC settings, but no MSVC build has been verified yet. The
-generated proxy stubs use GCC and Clang inline assembly, so an MSVC build needs an
-equivalent before it can link.
+MSVC is not supported, and configuring with it stops with an error. The generated
+proxy stubs are GCC and Clang inline assembly, and LLVM-MinGW is the one
+toolchain the project is built and tested with, from Linux or WSL as above.

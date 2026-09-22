@@ -8,7 +8,12 @@ project(opendlssg-fg
 if(NOT WIN32)
     message(FATAL_ERROR
         "opendlssg-fg targets Windows x64. Configure with the MinGW-w64 toolchain "
-        "(-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw-w64.cmake) or MSVC.")
+        "(-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw-w64.cmake).")
+endif()
+# The generated proxy stubs are GCC and Clang inline assembly, and the build is
+# tested with LLVM-MinGW only. Clang and GCC targeting MinGW are what CI builds.
+if(MSVC)
+    message(FATAL_ERROR "MSVC is not supported. Build with LLVM-MinGW; see docs/BUILD.md.")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -20,23 +25,14 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# Static CRT everywhere: the artifacts load into third-party game processes.
-if(MSVC)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-endif()
-
 add_compile_definitions(
     UNICODE _UNICODE
     WIN32_LEAN_AND_MEAN NOMINMAX
     ODG_VERSION="${PROJECT_VERSION}")
 
 add_library(odg_warnings INTERFACE)
-if(MSVC)
-    target_compile_options(odg_warnings INTERFACE /W4 /permissive- /Zc:preprocessor /EHsc)
-else()
-    target_compile_options(odg_warnings INTERFACE
-        -Wall -Wextra -Wno-unknown-pragmas -Wno-cast-function-type)
-endif()
+target_compile_options(odg_warnings INTERFACE
+    -Wall -Wextra -Wno-unknown-pragmas -Wno-cast-function-type)
 
 include(cmake/minhook.cmake)
 include(cmake/libhat.cmake)
