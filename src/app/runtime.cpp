@@ -182,11 +182,4 @@ void Initialize(HMODULE self) {
     loader::Start();
 }
 
-void Shutdown() {
-    if (!g_initialized.load(std::memory_order_acquire))
-        return;
-    log::Event(log::Level::Info, "detach", {});
-    log::Close();
-}
-
 } // namespace odg::app
