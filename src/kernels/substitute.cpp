@@ -248,7 +248,7 @@ Decision DecideFrom(HMODULE caller, const void* blob, size_t size, PtxSource sou
                     uint32_t target, std::vector<uint8_t>& out, Report& report,
                     const char*& reason) {
     if (!target || !blob || !size) {
-        reason = !RetargetingEnabled() ? "inactive" : target ? "empty" : "no target architecture";
+        reason = !Active() ? "inactive" : target ? "empty" : "no target architecture";
         return Decision::Unchanged;
     }
     if (const uint32_t cubin_arch = CubinArch(blob, size))
@@ -285,13 +285,12 @@ void Activate(uint32_t architecture, uint32_t implementation) {
                    {log::Field::Bool("enabled", g_options.enabled)});
 }
 
-bool RetargetingEnabled() {
-    return g_configured.load(std::memory_order_acquire) && g_options.enabled &&
-           g_active.load(std::memory_order_acquire);
+bool Active() {
+    return g_configured.load(std::memory_order_acquire) && g_active.load(std::memory_order_acquire);
 }
 
 uint32_t TargetSm() {
-    return RetargetingEnabled() ? ResolveTarget() : 0;
+    return Active() ? ResolveTarget() : 0;
 }
 
 Decision Decide(const void* blob, size_t size, const Request& request, std::vector<uint8_t>& out) {
@@ -299,8 +298,15 @@ Decision Decide(const void* blob, size_t size, const Request& request, std::vect
     const char* reason = "";
     const uint32_t target = TargetSm();
     const uint32_t index = g_decisions.fetch_add(1, std::memory_order_relaxed);
-    const Decision decision =
+    Decision decision =
         DecideFrom(request.module, blob, size, PreferredSource(), target, out, report, reason);
+    // With retargeting switched off the decision is still made, because an
+    // image this GPU cannot run must not reach the driver either way: on
+    // Vulkan it loads and then hangs the GPU. Only the replacement is withheld.
+    if (decision == Decision::Substituted && !g_options.enabled) {
+        decision = Decision::Refused;
+        reason = "retargeting is switched off";
+    }
     t_last_source_arch = decision == Decision::Substituted ? report.source_arch : 0;
 
     // Only decisions are dumped: the cap is small, and images passed through
@@ -368,7 +374,7 @@ void ReportDriverResult(uint32_t status, const char* route) {
 
 Decision Apply(void* params, const void* return_address) {
     t_saved = Saved{};
-    if (!RetargetingEnabled() || !params)
+    if (!Active() || !params)
         return Decision::Unchanged;
 
     BlobFields fields;

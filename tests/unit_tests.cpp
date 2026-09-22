@@ -239,6 +239,16 @@ void TestPtxSource() {
     CHECK(closest_text.find("0f3F000000") != std::string::npos);
     CHECK(!Fallback(both.data(), both.size(), 1, request, out)); // only once
 
+    // With retargeting switched off, an image this GPU cannot run is refused
+    // rather than handed to the driver, and a runnable one still passes.
+    options.enabled = false;
+    Configure(options);
+    CHECK(Decide(both.data(), both.size(), request, out) == Decision::Refused);
+    const std::vector<uint8_t> ampere = MakeContainer(80, PtxFor(80));
+    CHECK(Decide(ampere.data(), ampere.size(), request, out) == Decision::Unchanged);
+    options.enabled = true;
+    Configure(options);
+
     // A different parameter block would be launched with the wrong arguments.
     const std::string other = PtxFor(120, "\n.param .u64 k_param_0\n", "ret;");
     const std::vector<uint8_t> mismatched = MakeContainer({{89, ada}, {120, other}}, false);

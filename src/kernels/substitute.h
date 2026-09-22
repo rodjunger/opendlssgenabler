@@ -40,8 +40,10 @@ void Configure(const Options& options);
 // when the CUDA driver cannot be reached.
 void Activate(uint32_t architecture, uint32_t implementation);
 
-// Configured, switched on, and active on this GPU.
-bool RetargetingEnabled();
+// Configured and active on this GPU. Decisions are made whenever this holds;
+// Options::enabled only decides whether a replacement is supplied or the image
+// is refused.
+bool Active();
 
 // Architecture substitutions target, resolved once and cached. Called ahead of
 // time from the worker thread, so the first kernel creation does not pay for
