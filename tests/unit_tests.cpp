@@ -278,6 +278,17 @@ void TestRetarget() {
 
     // Truncated input is rejected rather than read past its end.
     CHECK(!Describe(ada.data(), 20, images));
+    // Including when the size given is shorter than the header claims to be.
+    std::vector<uint8_t> long_header = ada;
+    Put<uint16_t>(long_header, 0x06, 0x40);
+    CHECK(!Describe(long_header.data(), 32, images));
+    CHECK(!Retarget(long_header.data(), 32, 86, out, report));
+
+    // A decompressed length no PTX module could have is refused, not allocated.
+    std::vector<uint8_t> inflated = MakeContainer(89, PtxFor(89), true);
+    Put<uint64_t>(inflated, 16 + 0x38, uint64_t{1} << 40);
+    Report refused;
+    CHECK(!Retarget(inflated.data(), inflated.size(), 86, out, refused));
 
     // A compressed image comes out uncompressed, with its flag cleared.
     const std::vector<uint8_t> packed = MakeContainer(89, PtxFor(89), true);

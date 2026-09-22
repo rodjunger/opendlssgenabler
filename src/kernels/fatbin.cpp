@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <charconv>
-#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -67,8 +66,10 @@ std::optional<FileHeader> ContainerHeader(std::span<const uint8_t> data) {
 }
 
 bool Decompress(std::span<const uint8_t> in, size_t out_size, std::vector<uint8_t>& out) {
-    constexpr size_t kLz4Limit = std::numeric_limits<int>::max();
-    if (in.size() > kLz4Limit || out_size > kLz4Limit)
+    // The decompressed length comes from the image's own header. A PTX module
+    // never approaches the container limit, so a larger claim is corruption,
+    // not something to allocate for.
+    if (in.size() > kMaxContainerSize || out_size > kMaxContainerSize)
         return false;
     out.resize(out_size);
     const int written =
@@ -166,7 +167,9 @@ bool Describe(const void* blob, size_t size, std::vector<Image>& images) {
     images.clear();
     const auto container = View(blob, size);
     const auto header = ContainerHeader(container);
-    if (!header || header->fat_size > size - header->header_size)
+    // The header states its own length, so a caller's `size` can be shorter
+    // than it; checked first, or the subtraction below wraps.
+    if (!header || header->header_size > size || header->fat_size > size - header->header_size)
         return false;
 
     size_t offset = header->header_size;
