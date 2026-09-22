@@ -397,13 +397,13 @@ a driver-profile clamp between the comparison and the publication, which is why
 the parameter name is no longer what identifies a gate.
 
 This rule is mfg-unlock's, from its analysis of 310.6 through 310.8.
+`patchprobe` shows the classification for any runtime.
 
-The same id gates other Blackwell capabilities, so not every comparison is
-rewritten. A comparison whose result is published as a `DLSSG.` parameter other
-than `DLSSG.MultiFrameCountMax` is left alone; in 310.3 that keeps
-`DLSSG.ReflexWarp.Available` off. `patchprobe` shows the classification for any
-runtime. Nothing is rewritten unless the `MultiFrameCountMax` comparison itself
-is found.
+The gates are moved only once NVAPI has reported an Ampere GPU. On Ada the
+multi-frame decision is NVIDIA's to keep, and moving it would switch on paths
+whose kernels Ada does not have. A runtime that loads before the GPU has been
+identified is patched on the next module scan instead, logged as
+`multi_frame_deferred`.
 
 A game that only switches frame generation on and off never asks for more than
 one generated frame, whatever the runtime allows. `ForceMultiplier` replaces the

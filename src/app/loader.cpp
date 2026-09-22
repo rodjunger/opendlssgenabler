@@ -140,6 +140,27 @@ void ReportProvider(HMODULE module) {
                     log::Field::Str("note", "not verified yet; please report whether it works")});
 }
 
+// Multi-frame generation is unlocked only on a GPU this engine enables. On a
+// GPU that runs DLSS-G natively the gates are NVIDIA's decision to keep: moving
+// them on Ada would switch on multi-frame paths whose kernels Ada does not have.
+// UnlockMultiFrame acts once per runtime, so this is safe to call on every scan.
+void MaybeUnlockMultiFrame(HMODULE module, bool at_load) {
+    switch (spoof::nvapi::RealArchitecture()) {
+    case spoof::nvapi::Architecture::Supported:
+        provider::UnlockMultiFrame(module, at_load);
+        break;
+    case spoof::nvapi::Architecture::Unknown:
+        // Streamline asks the architecture long before the runtime loads, so
+        // this is not expected. The next scan retries once NVAPI has answered.
+        if (at_load)
+            log::Event(log::Level::Warning, "multi_frame_deferred",
+                       {log::Field::Str("note", "runtime loaded before the GPU was identified")});
+        break;
+    case spoof::nvapi::Architecture::NotNeeded:
+        break;
+    }
+}
+
 // Called on every module scan. Indexing happens before the runtime creates any
 // kernel, and resolving the target here keeps the cost of initializing CUDA off
 // the game's render thread.
@@ -157,12 +178,15 @@ void InspectProvider() {
         RecordRuntime(module);
 
     for (HMODULE module : KnownRuntimes()) {
-        if (!provider::IsDlssgProvider(module) || kernels::ProviderIndexed(module))
+        if (!provider::IsDlssgProvider(module))
+            continue;
+        // Normally already done inside the load. This covers a runtime that
+        // arrived some other way, or one that loaded before NVAPI had said what
+        // the GPU is.
+        MaybeUnlockMultiFrame(module, false);
+        if (kernels::ProviderIndexed(module))
             continue;
         ReportProvider(module);
-        // Normally already done inside the load; this covers a runtime that
-        // arrived some other way.
-        provider::UnlockMultiFrame(module, false);
         kernels::BuildProviderIndex(module);
     }
 
@@ -237,7 +261,7 @@ void ReportNvidiaModules() {
 void PrepareRuntime(HMODULE module) {
     if (!provider::IsDlssgProvider(module) || !RecordRuntime(module))
         return;
-    provider::UnlockMultiFrame(module, true);
+    MaybeUnlockMultiFrame(module, true);
 }
 
 // Otherwise does the minimum the loader lock allows: wakes the worker. On
