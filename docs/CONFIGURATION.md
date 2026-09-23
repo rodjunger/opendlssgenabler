@@ -1,154 +1,133 @@
 # Configuring opendlssg-fg
 
 `opendlssg.ini` sits beside the proxy DLL, next to the game's executable. It is
-read once at startup, so restart the game after editing it.
+read once at startup; restart the game after editing it.
 
 ## Start here
 
-**Ship the file as it comes and change nothing.** Every default is the value
-that should be running; the rest of the file exists to isolate a fault. Of the
-nine games in [TESTING.md](TESTING.md), seven needed no edit at all, and the
-other two needed one setting, `ForceMultiplier`, for the reason given below.
+**Use the file as shipped.** The defaults are the intended settings; the other
+options exist to isolate faults. Of the games in [TESTING.md](TESTING.md), only
+two needed a change, both `ForceMultiplier`.
 
-There are three reasons to open it at all:
+Reasons to edit it:
 
 | You want to | Change |
 |---|---|
-| Use 3x or 4x in a game whose menu only switches frame generation on and off | `ForceMultiplier` |
+| Use 3x or 4x in a game whose menu only has on and off | `ForceMultiplier` |
 | Report a problem | `Level=3` and `StreamlineDiagnostics=1` |
 | Try a newer NVIDIA runtime than the game ships | `[Runtime] Mode=Bundled` |
 
-Everything else is for narrowing down a failure, and each such setting says so
-below.
-
 ## File syntax
 
-- Section and key names ignore case. `[Kernels]` and `[kernels]` are the same.
-- A switch accepts `1`, `true`, `on` or `yes`, and `0`, `false`, `off` or `no`.
-- `;` or `#` starts a comment when it follows a space, so a value containing one,
-  such as a path, is kept whole. A line beginning with either is a comment.
-- A value outside its range falls back to the default and is reported in the log
-  as `config_value_rejected`, naming the key and why. Nothing is silently
-  ignored.
-- Deleting a key, or the whole file, uses the defaults. The engine runs without
-  an `opendlssg.ini`; `attach` records `config_found: false`.
+- Section and key names are case-insensitive.
+- Switches accept `1`, `true`, `on`, `yes` and `0`, `false`, `off`, `no`.
+- A line starting with `;` or `#` is a comment. After a value, `;` or `#` starts
+  a comment only when preceded by a space, so paths containing them are kept.
+- An out-of-range value falls back to the default and is logged as
+  `config_value_rejected`, with the key and the reason.
+- Missing keys use their defaults. Without the file, everything does, and
+  `attach` logs `config_found: false`.
 
-## What each setting does
+## Settings
 
 ### `[General]`
 
 **`Enabled`** (default `1`)
-`0` forwards the system DLL and does nothing else, leaving the game exactly as it
-would be without this file. Use it to confirm a problem is this engine's before
-uninstalling.
+`0` only forwards the system DLL. Use it to check whether a problem is caused by
+this project.
 
 ### `[FrameGeneration]`
 
 **`MultiFrame`** (default `1`)
-Lets NVIDIA's runtime generate more than one frame, so a game that supports
-multi-frame generation offers 3x and above. The runtime otherwise reserves that
-for RTX 50. `0` keeps every game at 2x, which is worth trying if a game is
-unstable above 2x.
+Lets the runtime generate more than one frame, which it otherwise reserves for
+RTX 50, so games that support it offer 3x and above. `0` limits every game to
+2x; try it if a game is unstable above 2x.
 
 **`ForceMultiplier`** (default `0`, otherwise `2` to `6`)
-`0` follows the multiplier the game asks for. Any other value forces that
-multiplier instead.
+`0` uses the multiplier the game asks for. Any other value replaces it.
 
-This is the one setting a working install may still need. The multiplier is the
-game's choice: it calls `slDLSSGSetOptions(numFramesToGenerate)`, and a menu that
-only switches frame generation on and off always asks for one generated frame,
-whatever the hardware allows. Far Far West and Halo Campaign Evolved are both
-like this, and both reach 4x with `ForceMultiplier=4`.
+The game sets the multiplier through `slDLSSGSetOptions(numFramesToGenerate)`.
+A menu with only on and off always asks for 2x. Far Far West and Halo Campaign
+Evolved are like this, and both reach 4x with `ForceMultiplier=4`.
 
-It never switches frame generation on. With the game's own setting off, nothing
-is forced. If the runtime refuses the count, the game's own request is sent
-again so it keeps the frame generation it asked for, and the log records
-`dlssg_force_rejected`. A game built against a newer Streamline than this
-release knows is not forced at all, and the log records `dlssg_force_skipped`.
+- It never turns frame generation on; with the game's setting off, nothing is
+  forced.
+- If the runtime refuses the count, the game's own request is sent instead and
+  `dlssg_force_rejected` is logged.
+- A game built against a newer Streamline than this release knows is not forced,
+  and `dlssg_force_skipped` is logged.
 
 ### `[Compatibility]`
 
-These settings change NVIDIA's own components, in memory. The defaults are
-correct on every GPU and game tested. Each is separately switchable because each
-could independently take the device down, which is what makes them useful when
-something goes wrong.
+These settings patch NVIDIA's components in memory. The defaults are correct on
+every tested GPU and game. Each can be switched off separately to find which one
+causes a crash.
 
 **`SpoofArchToGame`** (default `1`)
-Reports an Ada architecture to the three components that gate frame generation.
-`0` keeps the real architecture and leaves the hooks installed, which confirms
-the engine loads and binds without opening the gate. Frame generation will not
-be offered.
+Reports an Ada GPU to the components that gate frame generation. `0` keeps the
+hooks but reports the real architecture: useful to check that the DLL loads,
+but frame generation will not be offered.
 
 **`SpoofCallers`** (default `sl.common.dll,_nvngx.dll,nvngx_dlssg.dll`)
-Which modules are told the GPU is Ada, comma separated. Three need it, for three
-different checks:
+Comma-separated modules that are told the GPU is Ada:
 
 | Module | Why |
 |---|---|
-| `sl.common.dll` | Computes the adapter mask that decides whether the frame-generation plugin loads at all |
-| `_nvngx.dll` | Answers the availability query the plugin makes at startup |
-| `nvngx_dlssg.dll` | The frame-generation runtime, which does not create its kernels otherwise |
+| `sl.common.dll` | Computes the adapter mask that decides whether the frame-generation plugin loads |
+| `_nvngx.dll` | Answers the plugin's availability query |
+| `nvngx_dlssg.dll` | The runtime; it creates no kernels otherwise |
 
-Everything else, the game included, sees the real hardware. A module is matched
-by the component it is, not the file name it carries, so a copy NGX downloaded
-under a name like `160_E658700.bin` is still recognised as the runtime.
+Every other module, including the game, sees the real GPU. Modules are matched
+by what they are, not their file name, so a copy NGX downloaded as
+`160_E658700.bin` is still recognised as the runtime.
 
-**Keep this list short.** In PRAGMATA with path tracing on, telling every caller
-Ada removed the device before the main menu, most likely through the upscaling
-runtimes selecting Ada-only code paths. The value `none` tells every caller and
-exists to reproduce that, not to run with.
+**Keep this list short.** Telling every module Ada removed the device in
+PRAGMATA with path tracing on. `none` tells every module; it exists to
+reproduce that, not for normal use.
 
 **`PatchFlipMetering`** (default `1`)
-Steers the frame-generation plugin onto the software frame pacing it already
-carries. Ampere has no hardware flip metering, and without this a Direct3D 12
-game generates frames that are never shown.
+Makes the plugin use its software frame pacing. Ampere has no hardware flip
+metering, so without this a Direct3D 12 game generates frames that are never
+shown.
 
 **`FlipMeteringValue`** (default `-1`, otherwise `0` or `1`)
-The value that means "off" for the plugin's metering flag. `-1` reads it from the
-plugin's own code, which has been correct for every build checked. Set it only if
-a future plugin is read wrongly, which `flip_metering_forced` in the log would
-show.
+The plugin's "off" value for its metering flag. `-1` reads it from the plugin's
+code, which has worked on every build checked. Override it only if
+`flip_metering_forced` shows a wrong value.
 
 **`PatchFrameClamp`** (default `0`)
-Lifts the Streamline plugin's own clamp on the generated-frame count. The plugin
-a game ships already allows what that game supports, so this only matters for
-testing beyond it.
+Removes the plugin's limit on generated frames. The plugin a game ships already
+allows what the game supports, so this is only for testing.
 
 **`StubScgPriority`** (default `1`)
-Answers `NvAPI_D3D12_SetRawScgPriority` with success instead of running it. It is
-an Ada-only call that removes the device on older hardware.
+Returns success from `NvAPI_D3D12_SetRawScgPriority` without calling it. The call
+is Ada-only and removes the device on older GPUs.
 
 ### `[Kernels]`
 
 **`Retarget`** (default `1`)
-Supplies kernels this GPU can run: NVIDIA's own Ampere build where the runtime
-carries one, otherwise its PTX retargeted to this GPU. Without it frame
-generation is offered and then has nothing to execute. `0` is a diagnostic, and
-the log will fill with refusals: every image this GPU cannot run is still found
-and refused rather than handed to the driver, so the CUDA driver is still asked
-which GPU this is.
+Supplies kernels this GPU can run: NVIDIA's Ampere build where the runtime has
+one, otherwise its PTX recompiled for this GPU. With `0`, frame generation is
+offered but has no kernels to run; images this GPU cannot run are still refused
+rather than passed to the driver. Diagnostic only.
 
 **`TargetSM`** (default `0`, otherwise `50` to `200`)
-The architecture to build kernels for, as an SM number such as `86`. `0` asks the
-CUDA driver, which is right unless the driver cannot be reached;
-`kernel_target_resolved` names the source it used.
+The architecture to build kernels for, such as `86`. `0` asks the CUDA driver.
+`kernel_target_resolved` logs which source was used.
 
 **`VulkanHooks`** (default `1`)
-Covers Vulkan games, which hand their kernels to the driver through
-`VK_NVX_binary_import` rather than through NVAPI. It costs nothing in a
-Direct3D 12 game, where the Vulkan loader is never used.
+Handles Vulkan games, which load kernels through `VK_NVX_binary_import` instead
+of NVAPI. It has no effect in Direct3D 12 games.
 
 ### `[Runtime]`
 
 **`Mode`** (default `Off`) and **`RuntimeFile`** (default `opendlssg_nvngx_dlssg.dll`)
-Experimental. `Off` uses the frame-generation runtime the game ships. `Bundled`
-loads `RuntimeFile` from beside this file in its place, which is how a newer
-NVIDIA runtime is tried in an older game without changing anything the game
-installed. Copy the runtime next to `opendlssg.ini` under that name.
+Experimental. `Off` uses the game's runtime. `Bundled` loads `RuntimeFile` from
+beside this file instead, so you can try a newer runtime without changing the
+game's files. Copy the runtime next to `opendlssg.ini` under that name.
 
-`Bundled` also takes precedence over the runtime the driver's DLSS override
-would load. See [TESTING.md](TESTING.md#the-dlss-override) for how the two
-interact, and for the global alternative, which needs no setting here.
+`Bundled` also overrides the driver's DLSS override. See
+[TESTING.md](TESTING.md#the-dlss-override).
 
 ### `[Logging]`
 
@@ -157,47 +136,41 @@ interact, and for the global alternative, which needs no setting here.
 | Level | Records |
 |---|---|
 | `0` | Nothing |
-| `1` | Errors and warnings, plus the lines that identify the run |
-| `2` | One line per decision |
-| `3` | Every call, every kernel, every frame |
+| `1` | Errors, warnings, and the lines that identify the run |
+| `2` | Also one line per decision |
+| `3` | Also every call, kernel and frame |
 
-`1` is what a bug report needs: it still names the GPU, the driver, the game, the
-runtimes and the kernel totals, and it shows any step that failed. Use `3` only
-to investigate a specific problem. In Indiana Jones and the Great Circle it
-produces a quarter of a million lines.
+Level `1` is enough for a bug report: it names the GPU, driver, game, runtimes
+and kernel totals, and shows every failed step. Level `3` is for investigation;
+Indiana Jones and the Great Circle produces about 250,000 lines at it.
 
 **`Directory`** (default `opendlssg\logs`)
-Relative to this file, or absolute. Each process writes its own
-`loader_<pid>.jsonl` and the newest ten are kept. `sl.log` is Streamline's and is
-not pruned by this engine, but Streamline truncates it on every launch, so copy
-it aside before relaunching if it matters.
+Relative to this file, or absolute. Each process writes `loader_<pid>.jsonl`;
+the newest ten are kept. `sl.log` is not pruned, but Streamline overwrites it on
+every launch, so copy it before relaunching if you need it.
 
 ### `[Debug]`
 
 **`StreamlineDiagnostics`** (default `0`)
-Writes Streamline's own log as `sl.log` beside ours. Streamline states there, and
-nowhere else, why it accepts or refuses frame generation, so turn this on for any
-report about the feature being missing.
+Writes Streamline's log as `sl.log` beside ours. It is the only place Streamline
+says why it accepts or refuses frame generation, so enable it when reporting a
+missing feature.
 
 **`DumpKernels`** (default `0`)
-Writes the first few kernel images the runtime creates, before and after
-substitution, under the log directory. For investigating a kernel the driver
-refuses, and nothing else.
+Writes the first few kernel images, before and after substitution, to the log
+directory. Only for investigating a kernel the driver refuses.
 
-## Changing a setting to find a fault
+## Finding a fault
 
-When frame generation is missing or wrong, the log usually names the step that
-failed and no setting needs changing. Read [TESTING.md](TESTING.md) first. If it
-does not, these turn off one piece at a time, which tells you which piece is
-responsible:
+Check the log first (see [TESTING.md](TESTING.md)); it usually names the failed
+step. Otherwise, switch off one piece at a time:
 
-| Symptom | Try | What it tells you |
+| Symptom | Try | Tells you |
 |---|---|---|
-| The game crashes or the screen goes black at startup | `Enabled=0` | Whether this engine is involved at all |
-| The device is removed before the menu | `SpoofCallers` shortened, or `SpoofArchToGame=0` | Whether a spoofed caller is choosing code the GPU cannot run |
-| Frame generation is offered but nothing is generated | `Level=3`, then read `kernel_substituted` and `kernel_refused` | Which kernels were supplied and which were not |
-| Unstable above 2x | `MultiFrame=0` | Whether the multi-frame path is the cause |
-| A Direct3D 12 game generates frames that never appear | `PatchFlipMetering` is already on; check `flip_metering_forced` in the log | Whether the pacing patch found its site |
+| Crash or black screen at startup | `Enabled=0` | Whether this project is involved |
+| Device removed before the menu | Shorter `SpoofCallers`, or `SpoofArchToGame=0` | Whether a spoofed module picks code the GPU cannot run |
+| Frame generation offered, nothing generated | `Level=3`, read `kernel_substituted` and `kernel_refused` | Which kernels were and were not supplied |
+| Unstable above 2x | `MultiFrame=0` | Whether multi-frame is the cause |
+| Direct3D 12 frames generated but never shown | Check `flip_metering_forced` | Whether the pacing patch found its site |
 
-Change one setting at a time, and put it back afterwards. A setting left off is a
-capability given up.
+Change one setting at a time and restore it afterwards.
