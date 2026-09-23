@@ -25,40 +25,56 @@ stop that code running on Ampere:
 ## The components
 
 The game ships Streamline and the DLSS-G runtime. The driver supplies NVAPI,
-the NGX core and CUDA.
+the NGX core and CUDA. Each component makes its own decision about the GPU,
+which is why there are several gates rather than one.
 
-| Component | File | Ships with | Role |
-|---|---|---|---|
-| Streamline interposer | `sl.interposer.dll` | game | Entry point the game calls; loads plugins |
-| Streamline common | `sl.common.dll` | game | Reads system capabilities, decides which plugins run |
-| DLSS-G plugin | `sl.dlss_g.dll` | game | Streamline's wrapper around frame generation; paces output |
-| DLSS-G runtime | `nvngx_dlssg.dll` | game | Frame generation itself: the CUDA kernels |
-| NGX core | `_nvngx.dll` | driver | Loads NGX runtimes, answers capability queries |
-| NVAPI | `nvapi64.dll` | driver | Driver API; reports the GPU architecture |
-| CUDA driver | `nvcuda.dll` | driver | Compiles and runs kernels |
-
-```mermaid
-flowchart LR
-    game["Game"] --> interposer["sl.interposer"]
-    interposer --> common["sl.common"]
-    interposer --> plugin["sl.dlss_g"]
-    plugin --> ngx["_nvngx (NGX core)"]
-    ngx --> runtime["nvngx_dlssg (runtime)"]
-    common --> nvapi["nvapi64"]
-    ngx --> nvapi
-    runtime --> nvapi
-    runtime -- "D3D12: NvAPI cubin shaders" --> driver[("GPU driver")]
-    runtime -- "Vulkan: VK_NVX_binary_import" --> driver
-```
+| Component | File | Ships with | Responsible for | Decides, from the GPU architecture |
+|---|---|---|---|---|
+| Streamline interposer | `sl.interposer.dll` | game | The API the game calls; loads plugins | Nothing |
+| Streamline common | `sl.common.dll` | game | Reads system capabilities | Which plugins may load (gate 1) |
+| DLSS-G plugin | `sl.dlss_g.dll` | game | Streamline's wrapper around frame generation; presents and paces frames | Hardware or software pacing (gate 3) |
+| NGX core | `_nvngx.dll` | driver | Loads NGX runtimes, answers capability queries | Whether DLSS-G is available (gate 2) |
+| DLSS-G runtime | `nvngx_dlssg.dll` | game | Frame generation itself: a set of CUDA kernels | Which kernel builds to use (gate 4); how many frames (multi-frame) |
+| NVAPI | `nvapi64.dll` | driver | Driver API; reports the architecture; creates CUDA kernels under Direct3D 12 | Nothing; it is the source of the answer |
+| CUDA driver | `nvcuda.dll` | driver | Compiles and runs kernels | Nothing |
 
 The project is a DLL the game already loads by name (`version.dll`,
 `winmm.dll`, `dinput8.dll` or `dxgi.dll`). It forwards every export to the real
-system DLL and hooks the functions listed below.
+system DLL, so the game works normally, and changes the game's process in the
+places below.
 
 ## What is changed, and where
 
 Nothing on disk is modified. All changes are in memory, in the game's process,
-and only on Ampere.
+and only on Ampere. Dashed boxes are this project; everything else is NVIDIA's.
+
+```mermaid
+flowchart LR
+    game["Game"] --> interposer["sl.interposer"]
+    interposer --> common["sl.common<br/>gate 1: load sl.dlss_g?"]
+    interposer --> plugin["sl.dlss_g<br/>gate 3: which pacing?"]
+    plugin --> ngx["_nvngx<br/>gate 2: DLSS-G available?"]
+    ngx --> runtime["nvngx_dlssg<br/>gate 4: which kernels?<br/>how many frames?"]
+
+    common -- "GetArchInfo" --> arch
+    ngx -- "GetArchInfo" --> arch
+    runtime -- "GetArchInfo" --> arch
+    arch{{"hook: NvAPI_GPU_GetArchInfo<br/>calls the real function, then<br/>answers Ada to these three only"}} --> nvapi["nvapi64"]
+
+    pace{{"patch: every flag write<br/>selects software pacing"}} -.- plugin
+    mfg{{"patch: Blackwell comparisons<br/>compare against Ada"}} -.- runtime
+
+    runtime -- "create kernel<br/>(Ada image)" --> kern{{"hook: kernel creation<br/>swaps in an Ampere image"}}
+    kern -- "runnable image" --> driver[("GPU driver")]
+
+    classDef ours stroke-width:3px,stroke-dasharray:6 3
+    class arch,pace,mfg,kern ours
+```
+
+Read it left to right. The fake architecture opens gates 1 and 2, and makes the
+runtime run at all. But telling the plugin and the runtime they are on Ada also
+makes them choose Ada-only paths, so each of those choices is corrected where it
+is made: the pacing flag, and the kernels handed to the driver.
 
 | # | Where | Change | Why |
 |---|---|---|---|
@@ -72,6 +88,11 @@ and only on Ampere.
 | 6 | `kernel32` `LoadLibraryExW` | Wakes the worker thread on each load; applies 3b while the runtime loads | Timing |
 | 7 | `sl.interposer` exports | Logged only | [Diagnostics](#diagnosing-a-problem) |
 
+Two kinds of change are used. A **hook** redirects a function to this project's
+code, which usually calls the original and adjusts its inputs or result
+(MinHook inline hooks). A **patch** rewrites a few instruction bytes inside
+NVIDIA's code, found by signature, so that code makes a different choice.
+
 Off by default: lifting the plugin's frame-count clamp (`PatchFrameClamp`),
 forcing a multiplier (`ForceMultiplier`), and loading a different runtime
 (`[Runtime] Mode=Bundled`). A redirected runtime runs under its configured file
@@ -82,32 +103,49 @@ name, so that name is added to the callers told Ada.
 Streamline reads the GPU architecture once, in the first hundred milliseconds,
 and uses that value from then on. A hook installed later has no effect.
 
-`nvapi64.dll` is usually a static import of `sl.common.dll`, so it never goes
-through `LoadLibrary` by name. The project therefore loads `nvapi64.dll` itself,
-early, on its own thread, and hooks it before anyone else uses it.
+NVAPI exports a single function, `nvapi_QueryInterface`, which returns the
+address of any other NVAPI function from a numeric id. `nvapi64.dll` is usually
+a static import of `sl.common.dll`, so it never goes through `LoadLibrary` by
+name. The project therefore loads `nvapi64.dll` itself, early, on its own
+thread, asks it for `NvAPI_GPU_GetArchInfo`, and hooks that function in place.
+Every caller, whenever it resolved the function, then goes through the hook.
 
 ```mermaid
 sequenceDiagram
-    participant G as Game
-    participant E as Engine (own thread)
+    autonumber
+    participant L as Windows loader
+    participant P as Proxy DllMain
+    participant W as Proxy worker thread
+    participant N as nvapi64 (hooked)
     participant C as sl.common
-    participant N as nvapi64
+    participant O as Any other module
 
-    G->>E: loads version.dll (proxy)
-    E->>N: LoadLibrary, then hook GetArchInfo
-    G->>C: loads Streamline
+    L->>P: map version.dll (loader lock held)
+    P->>P: pin itself, bind forwarded exports
+    P->>W: start worker thread
+    Note over P: returns at once: no hooks under the loader lock
+    W->>N: LoadLibrary("nvapi64.dll")
+    W->>N: nvapi_QueryInterface(GetArchInfo id)
+    W->>N: inline hook on the returned function
     C->>N: NvAPI_GPU_GetArchInfo
-    N-->>E: 0x170 (Ampere)
-    E-->>C: 0x190 (Ada)
+    Note over N: hook calls the real function: 0x170 (Ampere)<br/>return address is inside sl.common: on the list
+    N-->>C: 0x190 (Ada)
     C->>C: adapter mask 0x1, sl.dlss_g loads
-    Note over G,C: frame generation is offered
+    O->>N: NvAPI_GPU_GetArchInfo
+    Note over N: return address not on the list
+    N-->>O: 0x170 (Ampere), unchanged
 ```
+
+The caller is identified by the module that contains the hook's return
+address, mapped back to the component it is (see
+[who is told](#who-is-told-and-who-must-not-be)).
 
 Two rules for installing hooks:
 
 - **No inline hook under the loader lock.** Installing one suspends all other
-  threads, which can deadlock a thread inside `LoadLibrary`. The
-  `LoadLibraryExW` hook only wakes a worker thread, which does the rest.
+  threads, which can deadlock a thread inside `LoadLibrary`. `DllMain` and the
+  `LoadLibraryExW` hook only start or wake the worker thread, which does the
+  rest.
 - **Publish the trampoline before enabling the hook.** Otherwise a thread can
   reach the hook with nothing to call; on `LoadLibraryExW` that fails a load the
   game asked for. `hooks::Install` always does this in order.
@@ -214,9 +252,38 @@ choose. A plugin that cannot be pinned is skipped and logged as
 
 ## Gate 4: kernels
 
+### Background: cubin, PTX and fatbin
+
+A CUDA kernel reaches the driver in one of three forms:
+
+- **Cubin.** Finished machine code (SASS) for one GPU architecture, packaged as
+  an ELF file. It runs only on the same major architecture with the same or a
+  newer minor: an `sm_80` cubin runs on `sm_86`, an `sm_89` one does not.
+- **PTX.** NVIDIA's virtual instruction set: a text assembly language that works
+  as an intermediate representation. The driver contains a JIT compiler that
+  turns PTX into machine code for the installed GPU when the module is loaded.
+  A module starts with a header like:
+
+  ```
+  .version <PTX ISA version>
+  .target sm_89
+  .address_size 64
+  ```
+
+  `.target` declares the oldest architecture the code needs. The JIT compiles
+  the module for that architecture or any newer one, and rejects an instruction
+  the declared target does not have. This forward-only rule is what lets old
+  CUDA programs run on new GPUs.
+- **Fatbin.** A container holding several cubin and PTX builds of the same
+  kernels, each tagged with its architecture, payloads optionally LZ4
+  compressed. The driver picks the entry that suits the GPU. Its layout is
+  declared in `src/kernels/fatbin.cpp`, from CUDA's `fatbinary.h`.
+
+`sm_86` is Ampere (RTX 30), `sm_89` Ada (RTX 40), `sm_120` Blackwell (RTX 50).
+
 ### Why nothing can run
 
-The runtime stores kernels in two forms and chooses by the architecture it
+The runtime stores its kernels in both forms and chooses by the architecture it
 believes it is on. In `nvngx_dlssg.dll` 310.3 and 310.6:
 
 | Form | Where | Architectures |
@@ -224,16 +291,11 @@ believes it is on. In `nvngx_dlssg.dll` 310.3 and 310.6:
 | Fatbin containers | inside the runtime | PTX `sm_89`, PTX `sm_120`, some cubin `sm_89` |
 | Standalone cubins | beside the containers | 39 `sm_89` and 39 `sm_86` |
 
-Since it must be told Ada to offer frame generation, it always picks `sm_89`,
-and none of those run on Ampere (`sm_86`):
-
-- **PTX** is compiled by the driver on load, but only for the architecture it
-  names or newer.
-- **A cubin** is machine code. It runs only on the same major version with the
-  same or newer minor: `sm_80` runs on `sm_86`, `sm_89` does not.
-
-On Direct3D 12 the driver refuses such an image. On Vulkan it accepts it and the
-GPU hangs when the kernel runs.
+It has to be told Ada to offer frame generation, so it always picks the `sm_89`
+builds. On Ampere the `sm_89` cubins are the wrong machine code, and the
+`sm_89` and `sm_120` PTX declare targets newer than the GPU, so the driver has
+nothing it can use. On Direct3D 12 the driver refuses such an image. On Vulkan
+it accepts a mismatched cubin and the GPU hangs when the kernel runs.
 
 ### What the engine supplies
 
@@ -265,11 +327,7 @@ in a different order per architecture, so position cannot be used. NVIDIA's
 only in metadata, so images are paired by kernel name and a hash of the code
 section. In both tested runtimes this pairs 39 of 39, each uniquely.
 
-**Retargeted PTX otherwise.** The PTX `.target` and the container's architecture
-field are set to `sm_86`, and the driver compiles it. Nothing else changes: the
-kernels use `mma.sync.m16n8k16` and `ldmatrix`, both available on Ampere, no FP8,
-and at most 13.8 KB of static shared memory. `tools/ptxprobe` checks this
-against the installed driver; all 72 PTX modules of 310.3 compile.
+**Retargeted PTX otherwise.** See [below](#how-ptx-is-retargeted).
 
 **Refused otherwise.** The creation call fails, which the runtime handles. If the
 driver refuses a substituted image, that error is returned; the original is
@@ -297,13 +355,84 @@ it is not answered at all; `provider_index_built` counts these as
 `ambiguous_images`. No checked runtime has any, so report a non-zero count.
 `patchprobe` shows it without a game.
 
-### Two routes to the driver
+### How PTX is retargeted
+
+`kernels::Retarget` (`src/kernels/fatbin.cpp`) builds a new container in memory:
+
+1. Parse the runtime's container and list its entries.
+2. If any entry already runs on this GPU, change nothing.
+3. Pick a PTX entry: the oldest one newer than the GPU (`sm_89`), or with
+   multi-frame on, the newest one with the same kernel interface
+   ([why](#multi-frame-generation)).
+4. Decompress it (LZ4) if needed.
+5. Rewrite every `.target sm_NN` directive to the GPU's architecture. No other
+   byte of the PTX changes.
+6. Emit a container with that one PTX entry, uncompressed, its architecture
+   field set to the GPU's. The original entry header is otherwise copied.
+
+```mermaid
+flowchart LR
+    subgraph original["Runtime's container (read only)"]
+        a1["PTX sm_89, LZ4"]
+        a2["PTX sm_120, LZ4"]
+        a3["cubin sm_89"]
+    end
+    subgraph rebuilt["New container (this project's memory)"]
+        b1["PTX, arch field 86<br/>.target sm_86<br/>uncompressed"]
+    end
+    a1 -- "decompress,<br/>rewrite .target" --> b1
+    b1 --> jit["Driver JIT:<br/>compiles for sm_86"]
+```
+
+The original container is never written to; the new one lives only for the call
+that hands it to the driver.
+
+**Why this works.** `.target sm_89` does not mean the code uses anything
+specific to Ada. It is the target NVIDIA compiled for. Lowering it is correct
+exactly when every instruction and resource the kernels use exists on Ampere.
+For these kernels that holds: they use `mma.sync.m16n8k16` and `ldmatrix`, both
+available since `sm_80`, no FP8 (Ada's main addition), and at most 13.8 KB of
+static shared memory. `tools/ptxprobe` compiles every module against the
+installed driver without a game; all 72 PTX modules of 310.3 compile.
+
+**If it does not hold.** A future kernel using an Ada-only instruction fails to
+compile when the module is created, and the driver's error is returned to the
+runtime (with multi-frame on, after one retry from the Ada PTX, logged as
+`kernel_fallback`). Nothing incompatible ever executes on the GPU.
+
+### Where the image is swapped
+
+The runtime creates kernels through one of three entry points:
 
 | API | Entry point | Interception |
 |---|---|---|
 | Direct3D 12 | `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Inline hook |
 | Direct3D 12, from 310.7 | `NvAPI_D3D12_CreateCuModule` | Inline hook |
 | Vulkan | `vkCreateCuModuleNVX` (`VK_NVX_binary_import`) | Wrapper returned by the loader's `vkGet*ProcAddr` |
+
+On the first route, one call looks like this:
+
+```mermaid
+sequenceDiagram
+    participant R as nvngx_dlssg
+    participant H as Hook
+    participant D as Decide / Retarget
+    participant N as Real NVAPI function
+
+    R->>H: CreateCubinComputeShaderExV2(params: sm_89 image)
+    H->>H: find the image pointer and length in params
+    H->>D: image, calling runtime
+    D-->>H: sm_86 cubin, or retargeted container
+    H->>N: same params, pointing at the replacement
+    Note over N: the driver compiles (PTX) or loads (cubin)
+    N-->>H: status and shader handle
+    H->>H: restore the original pointer and length
+    H-->>R: status and shader handle
+```
+
+`NvAPI_D3D12_CreateCuModule` takes the image as pointer and length arguments,
+and `vkCreateCuModuleNVX` in a `VkCuModuleCreateInfoNVX`; the hook passes the
+replacement in their place (Vulkan gets a copy of the create info).
 
 The NVAPI parameter block is versioned and undocumented. The project finds the
 image in it by looking for a pointer to a fatbin container next to a field
