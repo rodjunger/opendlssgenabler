@@ -49,6 +49,17 @@ constexpr std::string_view kFlipMeteringMarker = "FG1 DLL has been detected";
 // store follows the log call within a few instructions in every build seen.
 constexpr int kInstructionsAfterMarker = 64;
 
+// The NGX parameter newer plugins read to decide flip metering: a model version
+// of 0x200 or above selects it. Matched with its terminator, so a longer name
+// that starts the same way does not count.
+constexpr std::string_view kModelVersionParameter{"DLSSG.ModelVersion",
+                                                   sizeof("DLSSG.ModelVersion")};
+
+// How far past that reference to look for the store. The parameter read, the
+// error check and the version comparison come first, about a dozen
+// instructions in the builds seen.
+constexpr int kInstructionsAfterModelVersion = 32;
+
 // A frame count the plugin could plausibly have been compiled to allow.
 constexpr uint32_t kMaxPlausibleFrameLimit = 8;
 
@@ -114,6 +125,40 @@ std::optional<x86::ByteStore> FallbackStore(const std::byte* reference) {
     return std::nullopt;
 }
 
+// The first store to the flag after a reference to the model-version
+// parameter. A constant store is already handled with the other stores; a
+// register store is re-encoded to store the off value, when it fits in place.
+void AnalyzeModelVersionStore(std::span<const std::byte> image, std::span<const std::byte> code,
+                              PluginAnalysis::FlipMetering& flip) {
+    const auto parameter = hat::find_pattern(image, signature::Literal(kModelVersionParameter));
+    if (!parameter.has_result())
+        return;
+    for (const std::byte* reference : FindReferences(code, parameter.get())) {
+        const std::byte* cursor = reference;
+        for (int i = 0; i < kInstructionsAfterModelVersion; ++i) {
+            const auto instruction = x86::Decode(cursor);
+            if (!instruction)
+                break;
+            const auto constant = x86::AsByteStore(*instruction);
+            if (constant && constant->displacement == flip.flag_offset) {
+                flip.model_version_store = "constant";
+                return;
+            }
+            if (x86::AsRegisterByteStore(*instruction) == flip.flag_offset) {
+                auto bytes = x86::AsImmediateByteStore(*instruction, flip.off_value);
+                if (!bytes) {
+                    flip.model_version_store = "unfit";
+                    return;
+                }
+                flip.rewrites.push_back({instruction->address, std::move(*bytes)});
+                flip.model_version_store = "register";
+                return;
+            }
+            cursor = instruction->Next();
+        }
+    }
+}
+
 void AnalyzeFlipMetering(std::span<const std::byte> image, std::span<const std::byte> code,
                          PluginAnalysis& analysis) {
     const auto marker = hat::find_pattern(image, signature::Literal(kFlipMeteringMarker));
@@ -152,8 +197,10 @@ void AnalyzeFlipMetering(std::span<const std::byte> image, std::span<const std::
         const auto instruction = x86::Decode(match.get());
         const auto store = instruction ? x86::AsByteStore(*instruction) : std::nullopt;
         if (store && store->displacement == flip.flag_offset && store->value == on_value)
-            flip.opposite_stores.push_back(match.get() + instruction->length - 1);
+            flip.rewrites.push_back(
+                {match.get() + instruction->length - 1, {std::byte{flip.off_value}}});
     }
+    AnalyzeModelVersionStore(image, code, flip);
     analysis.flip_metering = std::move(flip);
 }
 
@@ -179,14 +226,16 @@ void PatchFlipMetering(const PluginAnalysis& analysis, const wchar_t* plugin) {
     }
     const auto& flip = *analysis.flip_metering;
     size_t patched = 0;
-    for (const std::byte* immediate : flip.opposite_stores)
-        patched += pe::PatchCode(immediate, &flip.off_value, sizeof(flip.off_value)) ? 1 : 0;
+    for (const auto& rewrite : flip.rewrites)
+        patched +=
+            pe::PatchCode(rewrite.address, rewrite.bytes.data(), rewrite.bytes.size()) ? 1 : 0;
     log::Event(patched ? log::Level::Info : log::Level::Warning, "flip_metering_forced",
                {log::Field::Path("plugin", plugin),
                 log::Field::Hex("flag_offset", static_cast<uint32_t>(flip.flag_offset)),
                 log::Field::Uint("off_value", flip.off_value),
                 log::Field::Bool("overridden", g_flip_value.load(std::memory_order_acquire) >= 0),
-                log::Field::Uint("stores_patched", patched)});
+                log::Field::Uint("stores_patched", patched),
+                log::Field::Str("model_version_store", flip.model_version_store)});
 }
 
 void PatchFrameClamp(const PluginAnalysis& analysis, const wchar_t* plugin) {

@@ -18,5 +18,7 @@ void SetForceMultiplier(uint32_t multiplier);
 void SetDiagnostics(bool enabled);
 
 bool InstallInterposerHooks(HMODULE interposer);
+// Whether the game has most recently asked for frame generation to be on.
+bool FrameGenerationOn();
 
 } // namespace odg::streamline

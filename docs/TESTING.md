@@ -63,6 +63,8 @@ run`.
 | No 3x or 4x option | `multi_frame_gates_not_found`, or the game's plugin caps it (`SL Plugin supports N` in `sl.log`) |
 | Option present, no extra frames | `kernel_substituted` missing or `kernel_refused` present |
 | Frame generation on, nothing generated, no refusal | `cu_function_missing` names a kernel missing from the substituted module |
+| Frame generation lowers the frame rate, Vulkan game | Check `reflex_present_pacing` with `low_latency_off: true` is logged. If not, and `PatchFlipMetering=1`, the driver may be pacing every present; see [ARCHITECTURE.md](ARCHITECTURE.md#reflex-and-present-pacing) |
+| `StreamlineDiagnostics=1` but no `sl.log` | The proxy loaded after Streamline started; set the variables yourself, see [ARCHITECTURE.md](ARCHITECTURE.md#diagnosing-a-problem) |
 | `NvAPI_D3D12_CreateCuModule failed` in `sl.log`, then a crash | The fatbin route failed; look for `cu_module_intercepted` |
 | Vulkan game, no extra frames | `vulkan_hooks_unavailable` |
 | `kernel_fallback` | The driver rejected a Blackwell kernel; 3x and above may be wrong, 2x still works |
@@ -135,4 +137,5 @@ All on an RTX 3080.
 | Frostpunk 2 | Direct3D 12 | 310.5.2 | `presented` 2, 3 and 4. Artefacts in a cutscene at 3x, where `sl.log` shows the game's own frames arriving over 100 ms apart |
 | Crimson Desert | Direct3D 12 | 310.9.1 | Via `Mode=Bundled`, with Ray Reconstruction: `presented` 2, 3, 4, 5 and 6. The only tested game whose plugin (Streamline 2.11.1) allows 5 generated frames |
 | Corsair Cove | Direct3D 12 | 310.5.2 | `presented` 2 and 3; 4x accepted but not confirmed. Streamline 2.10.3, plugins NGX downloaded |
+| No Man's Sky (Microsoft Store) | Vulkan | 310.9.0 | Via the DLSS override (the game ships 310.7.0). `presented` 2, 3 and 4, 192 kernels, none refused. Streamline ran NGX plugin 134656. Needs the [Reflex pacing fix](ARCHITECTURE.md#reflex-and-present-pacing): without it, 2x dropped output from about 136 fps to 59 |
 | Palworld (Steam) | Direct3D 12 | 310.4.0 | `presented` 2, 3 and 4, 384 kernels, none refused. Needs the `-dx12` launch option (Direct3D 11 is the default and unsupported). Install the proxy as `dxgi.dll`; the game does not load `version.dll` |

@@ -16,7 +16,7 @@ This means:
 - No NVIDIA files are included or modified.
 - Image quality and frame pacing are NVIDIA's.
 
-> **Status: early development.** Works on an RTX 3080 in all 10 games tested so
+> **Status: early development.** Works on an RTX 3080 in all 11 games tested so
 > far, at up to 6x where the game allows it. See the
 > [list of tested games](docs/TESTING.md#tested-so-far). Some games will not
 > work yet; reports help.

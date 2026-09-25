@@ -86,9 +86,15 @@ PRAGMATA with path tracing on. `none` tells every module; it exists to
 reproduce that, not for normal use.
 
 **`PatchFlipMetering`** (default `1`)
-Makes the plugin use its software frame pacing. Ampere has no hardware flip
-metering, so without this a Direct3D 12 game generates frames that are never
-shown.
+Fixes frame pacing on Ampere, in two places:
+
+- Makes the plugin use its software frame pacing. Ampere has no hardware flip
+  metering, so without this a Direct3D 12 game generates frames that are never
+  shown.
+- In a Vulkan game that turns Reflex on but never calls its sleep, such as No
+  Man's Sky, passes Reflex low-latency mode to the driver as off while frame
+  generation is on. Otherwise the driver paces every generated frame as a whole
+  one, and frame generation halves the frame rate.
 
 **`FlipMeteringValue`** (default `-1`, otherwise `0` or `1`)
 The plugin's "off" value for its metering flag. `-1` reads it from the plugin's

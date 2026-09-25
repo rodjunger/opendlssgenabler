@@ -25,12 +25,14 @@ bool ReportPlugin(HMODULE plugin) {
     const auto analysis = odg::streamline::AnalyzePlugin(plugin);
     bool ok = true;
     if (const auto& flip = analysis.flip_metering) {
-        std::printf("  flip metering: flag +0x%x, off %u, stores to rewrite %zu\n",
+        std::printf("  flip metering: flag +0x%x, off %u, stores to rewrite %zu, "
+                    "model-version store %s\n",
                     static_cast<unsigned>(flip->flag_offset), flip->off_value,
-                    flip->opposite_stores.size());
-        for (const std::byte* store : flip->opposite_stores)
-            std::printf("    immediate at rva 0x%zx\n", Rva(store, plugin));
-        ok = !flip->opposite_stores.empty();
+                    flip->rewrites.size(), flip->model_version_store);
+        for (const auto& rewrite : flip->rewrites)
+            std::printf("    %zu byte(s) at rva 0x%zx\n", rewrite.bytes.size(),
+                        Rva(rewrite.address, plugin));
+        ok = !flip->rewrites.empty();
     } else {
         std::printf("  flip metering: not found (%s)\n", analysis.flip_metering_problem);
         ok = false;

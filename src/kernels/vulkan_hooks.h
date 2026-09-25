@@ -11,4 +11,9 @@ namespace odg::kernels {
 // Returns false while it is not loaded, so a module scan can simply call again.
 bool InstallVulkanHooks();
 
+// While frame generation is on and the game never calls vkLatencySleepNV, pass
+// Reflex low-latency mode to the driver as off, so it does not pace every
+// generated frame as a whole one. Follows the PatchFlipMetering setting.
+void SetPresentPacingFix(bool enabled);
+
 } // namespace odg::kernels

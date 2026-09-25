@@ -85,6 +85,7 @@ is made: the pacing flag, and the kernels handed to the driver.
 | 4 | `nvapi64` `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Kernel image replaced | Gate 4, Direct3D 12, one cubin at a time |
 | 4b | `nvapi64` `NvAPI_D3D12_CreateCuModule` | Fatbin replaced | Gate 4, Direct3D 12, runtimes from 310.7 |
 | 5 | Vulkan loader `vkGetDeviceProcAddr` and `vkGetInstanceProcAddr` | Return a wrapper for `vkCreateCuModuleNVX` | Gate 4, Vulkan |
+| 5b | Vulkan loader, `vkSetLatencySleepModeNV` | Low-latency mode off while frame generation is on and the game never sleeps | [Reflex and present pacing](#reflex-and-present-pacing) |
 | 6 | `kernel32` `LoadLibraryExW` | Wakes the worker thread on each load; applies 3b while the runtime loads | Timing |
 | 7 | `sl.interposer` exports | Logged only | [Diagnostics](#diagnosing-a-problem) |
 
@@ -264,7 +265,13 @@ The plugin can pace in two ways:
 
 The plugin chooses by the GPU it believes it is on. Told Ada, it picks hardware
 metering, which Ampere cannot do: under Direct3D 12 the generated frames are
-never shown. On Vulkan the flag has no effect.
+never shown.
+
+On Vulkan the plugin meters presents through the driver's
+`VK_NV_present_metering` whenever the driver lists it, which this driver does
+on Ampere. The flag below does not stop that, and frame generation works with
+it. What does break on Vulkan is Reflex pacing; see
+[below](#reflex-and-present-pacing).
 
 **The fix.** The plugin already contains the software path. It takes it when it
 detects an older frame-generation runtime: right after logging
@@ -279,28 +286,38 @@ decision everywhere:
    `mov byte ptr [rbx+0x38bc], 0`. Its offset is the flag; its value is "off".
 4. Find every other store to the same offset with the opposite value, and
    change its immediate byte to the off value.
+5. Newer builds also set the flag to "on" right after reading the NGX parameter
+   `DLSSG.ModelVersion` (on when the version is `0x200` or above). Some builds
+   compile that store from a register (`mov byte ptr [rbx+0x4520], dil`), which
+   step 4 cannot see. The first store to the flag after the parameter's
+   reference is rewritten as a constant store of the off value, in place. It
+   is done only when the new instruction is exactly as long as the old one;
+   otherwise nothing is changed and `model_version_store` in the log says
+   `unfit`.
 
-After that the flag can only ever hold "off", so the plugin always uses
-software pacing.
+After that no store can set the flag to "on".
 
 **Why the value is read, not assumed.** The flag's offset and its off value both
 change between plugin builds, so neither can be hard-coded. `patchprobe` run
 on the plugin copies installed on the test machine gives:
 
-| Plugin build | Flag offset | Off value | Opposite stores rewritten |
+| Plugin build | Flag offset | Off value | Stores rewritten |
 |---|---|---|---|
 | NGX 132874, 133131, 133132 (PRAGMATA's generation) | `0x38bc` | 0 | 2 |
 | NGX 133632 to 133635 | `0x44a4` | 1 | 0 |
 | NGX 133888, DOOM The Dark Ages | `0x44a0` | 1 | 1 |
 | NGX 134273 | `0x44f8` | 1 | 1 |
 | Forza Horizon 6 | `0x44b0` | 1 | 1 |
-| NGX 134656 | `0x4520` | 1 | 0 |
+| NGX 134656 (No Man's Sky) | `0x4520` | 1 | 1, the register store |
 
 Older builds write 0 for "off", newer ones write 1. Assuming either value would
-force hardware metering on the other half. In a build with no opposite store
-nothing is changed, and `flip_metering_forced` reports `stores_patched: 0` as a
-warning. If the marker or the store is not
-found, nothing is patched and `flip_metering_not_patched` is logged.
+force hardware metering on the other half.
+
+NGX 133632 to 133635 store only the off value, on the old-runtime path. The
+flag otherwise keeps the 0 the plugin's constructor gives it, so nothing is
+rewritten and `flip_metering_forced` reports `stores_patched: 0` as a warning.
+If the marker or the store is not found, nothing is patched and
+`flip_metering_not_patched` is logged.
 
 `patchprobe` prints the result for any `sl.dlss_g.dll`.
 
@@ -309,6 +326,46 @@ is pinned first (as the proxy pins itself, see [startup](#startup-opening-the-ga
 because Streamline can unload the copy it did not choose while it is being
 read. A plugin that cannot be pinned is skipped and logged as
 `plugin_pin_failed`.
+
+### Reflex and present pacing
+
+Reflex on Vulkan uses the driver extension `VK_NV_low_latency2`. The game turns
+low-latency mode on (`vkSetLatencySleepModeNV`) and is expected to call
+`vkLatencySleepNV` once per frame, which is where the driver makes it wait.
+
+A game that turns low-latency mode on and never calls the sleep is paced by the
+driver inside `vkQueuePresentKHR` instead: the driver waits in a timed loop
+(`SleepEx`, `QueryPerformanceCounter`) before each present. With one present
+per frame that works. With frame generation on, Streamline's presenter thread
+makes a present for every displayed frame, generated ones included, and the
+driver paces each of them as a whole frame. Output drops to half the refresh
+rate, the GPU idles, and the game's render thread waits on the presenter.
+
+No Man's Sky does this. On a 120 Hz display, frame generation took it from
+about 136 fps to 59, with each present held about 16.7 ms in the driver.
+
+**The fix.** In No Man's Sky, Streamline resolves both functions through the
+Vulkan loader, where the engine already sits (#5 in
+[the table](#what-is-changed-and-where)). On Ampere, while frame generation is on and nothing has called
+`vkLatencySleepNV`, `vkSetLatencySleepModeNV` is passed to the driver with
+low-latency mode and boost off. The game's other Reflex settings and markers
+are unchanged.
+
+Only calls the game makes are changed; the engine never calls the driver on its
+own. So after frame generation is switched off, low latency stays off until
+Streamline next sets the sleep mode, which it does on every new swapchain. In No
+Man's Sky that came seconds later, when the swapchain was next recreated. The
+cost is some added latency in that window, not lost frames. Each change of
+decision is logged as `reflex_present_pacing` with `low_latency_off`.
+
+What it leaves alone:
+
+- **A game that calls the sleep**, such as DOOM The Dark Ages. Its pacing
+  already works, and its Reflex is untouched.
+- **Frame generation off.** The game's own setting is passed through.
+- **Other GPUs.**
+
+It follows `PatchFlipMetering`.
 
 ## Gate 4: kernels
 
@@ -645,6 +702,11 @@ another one is not a failure.
 **Streamline's log.** Streamline explains its decisions only in its own log. A
 production interposer ignores its JSON config, so `StreamlineDiagnostics=1` sets
 `SL_LOG_LEVEL` and `SL_LOG_PATH` before Streamline starts, producing `sl.log`.
+Streamline reads them early in `slInit`. In a game whose executable does not
+import the proxy's name, the proxy is first loaded by `sl.common.dll`, inside
+`slInit` and too late, and no `sl.log` appears; No Man's Sky is one. Set the
+two variables as user environment variables instead (`setx SL_LOG_LEVEL 2`,
+`setx SL_LOG_PATH <folder>`), start the game, and remove them afterwards.
 
 **Black screen or freeze.** Usually a GPU hang, which Windows logs in the System
 event log as `nvlddmkm`, `Restarting TDR occurred`.

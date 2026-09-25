@@ -7,6 +7,7 @@
 
 #include <sl.h>
 #include <sl_dlss_g.h>
+#include <sl_reflex.h>
 
 #include <atomic>
 #include <cstring>
@@ -19,6 +20,7 @@ std::atomic<uint32_t> g_force_multiplier{0};
 std::atomic<bool> g_installed{false};
 std::atomic<PFun_slGetFeatureFunction*> g_get_feature_function{nullptr};
 std::atomic<PFun_slDLSSGSetOptions*> g_set_options{nullptr};
+std::atomic<bool> g_frame_generation_on{false};
 std::atomic<PFun_slDLSSGGetState*> g_get_state{nullptr};
 std::atomic<uint64_t> g_set_calls{0};
 std::atomic<uint64_t> g_last_request{UINT64_MAX};
@@ -149,6 +151,7 @@ sl::Result HookSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
     PFun_slDLSSGSetOptions* original = g_set_options.load(std::memory_order_acquire);
     if (!original)
         return sl::Result::eErrorNotInitialized;
+    g_frame_generation_on.store(options.mode != sl::DLSSGMode::eOff, std::memory_order_release);
 
     // This engine changes how many frames are generated, never whether they are.
     if (options.mode == sl::DLSSGMode::eOff)
@@ -163,6 +166,8 @@ sl::Result HookSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
             log::Event(log::Level::Info, "dlssg_set_options",
                        {log::Field::Str("mode", ModeName(options.mode)),
                         log::Field::Uint("num_frames", options.numFramesToGenerate),
+                        log::Field::Hex("flags", static_cast<uint32_t>(options.flags)),
+                        log::Field::Uint("back_buffers", options.numBackBuffers),
                         log::Field::Str("result", ResultName(result)),
                         log::Field::Str("forced", "no")});
             if (result == sl::Result::eOk)
@@ -212,13 +217,45 @@ sl::Result HookSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
     return result;
 }
 
+// The Reflex options a game requests, recorded when they change; nothing is
+// altered. Whether low-latency mode is on decides how the driver paces
+// presents, which matters with frame generation (see kernels/vulkan_hooks).
+std::atomic<PFun_slReflexSetOptions*> g_reflex_set_options{nullptr};
+std::atomic<uint64_t> g_last_reflex_request{UINT64_MAX};
+
+sl::Result HookReflexSetOptions(const sl::ReflexOptions& options) {
+    PFun_slReflexSetOptions* original = g_reflex_set_options.load(std::memory_order_acquire);
+    if (!original)
+        return sl::Result::eErrorNotInitialized;
+    const sl::Result result = original(options);
+    const uint64_t request = (uint64_t{static_cast<uint32_t>(options.mode)} << 33) |
+                             (uint64_t{options.useMarkersToOptimize} << 32) | options.frameLimitUs;
+    if (g_last_reflex_request.exchange(request, std::memory_order_relaxed) != request)
+        log::Event(log::Level::Info, "reflex_set_options",
+                   {log::Field::Uint("mode", static_cast<uint32_t>(options.mode)),
+                    log::Field::Uint("frame_limit_us", options.frameLimitUs),
+                    log::Field::Bool("markers_optimize", options.useMarkersToOptimize),
+                    log::Field::Str("result", ResultName(result))});
+    return result;
+}
+
 sl::Result HookGetFeatureFunction(sl::Feature feature, const char* function_name, void*& function) {
     PFun_slGetFeatureFunction* original = g_get_feature_function.load(std::memory_order_acquire);
     if (!original)
         return sl::Result::eErrorNotInitialized;
 
     const sl::Result result = original(feature, function_name, function);
-    if (result != sl::Result::eOk || feature != sl::kFeatureDLSS_G || !function_name || !function)
+    if (result != sl::Result::eOk || !function_name || !function)
+        return result;
+
+    if (feature == sl::kFeatureReflex && std::strcmp(function_name, "slReflexSetOptions") == 0 &&
+        function != reinterpret_cast<void*>(&HookReflexSetOptions)) {
+        g_reflex_set_options.store(reinterpret_cast<PFun_slReflexSetOptions*>(function),
+                                   std::memory_order_release);
+        function = reinterpret_cast<void*>(&HookReflexSetOptions);
+        return result;
+    }
+    if (feature != sl::kFeatureDLSS_G)
         return result;
 
     if (std::strcmp(function_name, "slDLSSGGetState") == 0) {
@@ -405,6 +442,10 @@ sl::Result HookInit(const sl::Preferences& preferences, uint64_t sdk_version) {
 }
 
 } // namespace
+
+bool FrameGenerationOn() {
+    return g_frame_generation_on.load(std::memory_order_acquire);
+}
 
 void SetForceMultiplier(uint32_t multiplier) {
     g_force_multiplier.store(multiplier, std::memory_order_release);

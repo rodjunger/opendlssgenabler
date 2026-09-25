@@ -6,6 +6,7 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "kernels/substitute.h"
+#include "kernels/vulkan_hooks.h"
 #include "provider/multi_frame.h"
 #include "proxy/proxy.h"
 #include "spoof/nvapi.h"
@@ -119,6 +120,7 @@ void ApplySettings(const Settings& settings, const std::wstring& self_dir) {
 
     ConfigureKernels(settings, log_directory);
     loader::SetVulkanHooksEnabled(settings.vulkan_hooks);
+    kernels::SetPresentPacingFix(settings.patch_flip_metering);
     if (settings.streamline_diagnostics)
         ArmStreamlineDiagnostics(log_directory);
     ReportHardwareScheduling();

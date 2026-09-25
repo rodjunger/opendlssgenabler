@@ -636,13 +636,48 @@ void TestPluginAnalysis() {
     CHECK(analysis.flip_metering.has_value());
     if (const auto& flip = analysis.flip_metering) {
         CHECK(flip->flag_offset == 0x38BC && flip->off_value == 0);
-        CHECK(flip->opposite_stores.size() == 2);
-        CHECK(flip->opposite_stores.size() == 2 && flip->opposite_stores[0] == base + 26 &&
-              flip->opposite_stores[1] == base + 33);
+        CHECK(flip->rewrites.size() == 2);
+        CHECK(flip->rewrites.size() == 2 && flip->rewrites[0].address == base + 26 &&
+              flip->rewrites[1].address == base + 33);
+        CHECK(std::string(flip->model_version_store) == "absent");
     }
     CHECK(analysis.frame_clamp.has_value());
     if (const auto& clamp = analysis.frame_clamp)
         CHECK(clamp->limit == 3 && clamp->cmov == base + 48);
+
+    // Newer plugins: off is 1, and after reading DLSSG.ModelVersion the flag is
+    // set to on from a register. That store is re-encoded in place.
+    constexpr size_t kParameter = 160;
+    std::vector<uint8_t> newer(kImage, 0x90);
+    PutLea(newer, 0, {0x48, 0x8D, 0x0D}, kMarker);                     // lea rcx, marker
+    PutBytes(newer, 7, {0xC6, 0x83, 0x20, 0x45, 0x00, 0x00, 0x01});    // mov [rbx+4520h], 1
+    PutLea(newer, 14, {0x48, 0x8D, 0x15}, kParameter);                 // lea rdx, parameter
+    PutBytes(newer, 21, {0x81, 0xFA, 0x00, 0x02, 0x00, 0x00});         // cmp edx, 200h
+    PutBytes(newer, 27, {0x7C, 0x10});                                 // jl
+    PutBytes(newer, 29, {0x40, 0x88, 0xBB, 0x20, 0x45, 0x00, 0x00});   // mov [rbx+4520h], dil
+    PutText(newer, kMarker, "FG1 DLL has been detected");
+    PutText(newer, kParameter, "DLSSG.ModelVersion");
+    const auto registered =
+        odg::streamline::AnalyzePlugin(Bytes(newer, kImage), Bytes(newer, kCode));
+    const auto* newer_base = reinterpret_cast<const std::byte*>(newer.data());
+    CHECK(registered.flip_metering.has_value());
+    if (const auto& flip = registered.flip_metering) {
+        CHECK(flip->flag_offset == 0x4520 && flip->off_value == 1);
+        CHECK(std::string(flip->model_version_store) == "register");
+        const std::vector<std::byte> immediate = {
+            std::byte{0xC6}, std::byte{0x83}, std::byte{0x20}, std::byte{0x45},
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x01}}; // mov [rbx+4520h], 1
+        CHECK(flip->rewrites.size() == 1 && flip->rewrites[0].address == newer_base + 29 &&
+              flip->rewrites[0].bytes == immediate);
+    }
+
+    // A register store that needs no REX prefix is one byte shorter than its
+    // immediate form, so it cannot be replaced in place and is left.
+    PutBytes(newer, 29, {0x88, 0x83, 0x20, 0x45, 0x00, 0x00, 0x90});   // mov [rbx+4520h], al
+    const auto unfit =
+        odg::streamline::AnalyzePlugin(Bytes(newer, kImage), Bytes(newer, kCode));
+    CHECK(unfit.flip_metering && unfit.flip_metering->rewrites.empty() &&
+          std::string(unfit.flip_metering->model_version_store) == "unfit");
 
     // Without the marker nothing is found, and the reason says so.
     std::vector<uint8_t> unmarked = image;

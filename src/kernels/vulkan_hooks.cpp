@@ -5,6 +5,7 @@
 #include "core/paths.h"
 #include "core/pe.h"
 #include "kernels/substitute.h"
+#include "streamline/streamline.h"
 
 #include <atomic>
 #include <cstring>
@@ -102,9 +103,83 @@ int32_t __stdcall HookedCreateCuFunction(void* device, const CuFunctionCreateInf
     return status;
 }
 
+// Reflex on Vulkan (VK_NV_low_latency2). With low-latency mode on, the driver
+// expects a vkLatencySleepNV call every frame. A game that never makes one is
+// paced by the driver inside vkQueuePresentKHR instead, one present at a time.
+// With frame generation on, the presenter makes a present for every displayed
+// frame, generated ones included, so that pacing holds the output to half the
+// refresh rate while the GPU idles. No Man's Sky turns Reflex on and never
+// sleeps. While frame generation is on and no vkLatencySleepNV has been seen,
+// low-latency mode is passed to the driver as off. Otherwise the game's request
+// is passed through; Streamline sends it again on every new swapchain, which
+// is how the game's setting comes back after frame generation is switched off.
+
+// VkLatencySleepModeInfoNV, from the Vulkan specification.
+struct LatencySleepModeInfo {
+    uint32_t type;
+    const void* next;
+    uint32_t low_latency_mode;
+    uint32_t low_latency_boost;
+    uint32_t minimum_interval_us;
+};
+using PfnSetLatencySleepMode = int32_t(__stdcall*)(void* device, uint64_t swapchain,
+                                                   const LatencySleepModeInfo* info);
+using PfnLatencySleep = int32_t(__stdcall*)(void* device, uint64_t swapchain, const void* info);
+
+std::atomic<PfnSetLatencySleepMode> g_set_latency_sleep_mode{nullptr};
+std::atomic<PfnLatencySleep> g_latency_sleep{nullptr};
+std::atomic<bool> g_latency_sleep_seen{false};
+std::atomic<bool> g_present_pacing_fix{true};
+std::atomic<bool> g_low_latency_off{false};
+
+int32_t __stdcall HookedLatencySleep(void* device, uint64_t swapchain, const void* info) {
+    const PfnLatencySleep original = g_latency_sleep.load(std::memory_order_acquire);
+    if (!original)
+        return kVkErrorUnknown;
+    g_latency_sleep_seen.store(true, std::memory_order_release);
+    return original(device, swapchain, info);
+}
+
+bool TurnsLowLatencyOff(const LatencySleepModeInfo& requested) {
+    return requested.low_latency_mode && Active() &&
+           g_present_pacing_fix.load(std::memory_order_acquire) &&
+           !g_latency_sleep_seen.load(std::memory_order_acquire) &&
+           streamline::FrameGenerationOn();
+}
+
+int32_t __stdcall HookedSetLatencySleepMode(void* device, uint64_t swapchain,
+                                            const LatencySleepModeInfo* info) {
+    const PfnSetLatencySleepMode original = g_set_latency_sleep_mode.load(std::memory_order_acquire);
+    if (!original)
+        return kVkErrorUnknown;
+    const bool off = info && TurnsLowLatencyOff(*info);
+    if (info && g_low_latency_off.exchange(off, std::memory_order_relaxed) != off)
+        log::Event(log::Level::Info, "reflex_present_pacing",
+                   {log::Field::Bool("low_latency_off", off),
+                    log::Field::Bool("frame_generation", streamline::FrameGenerationOn()),
+                    log::Field::Bool("game_sleeps",
+                                     g_latency_sleep_seen.load(std::memory_order_acquire))});
+    if (!off)
+        return original(device, swapchain, info);
+    LatencySleepModeInfo sent = *info;
+    sent.low_latency_mode = 0;
+    sent.low_latency_boost = 0;
+    return original(device, swapchain, &sent);
+}
+
 PfnVoidFunction Intercept(const char* name, PfnVoidFunction resolved) {
     if (!resolved || !name)
         return resolved;
+    if (std::strcmp(name, "vkSetLatencySleepModeNV") == 0) {
+        g_set_latency_sleep_mode.store(reinterpret_cast<PfnSetLatencySleepMode>(resolved),
+                                       std::memory_order_release);
+        return reinterpret_cast<PfnVoidFunction>(&HookedSetLatencySleepMode);
+    }
+    if (std::strcmp(name, "vkLatencySleepNV") == 0) {
+        g_latency_sleep.store(reinterpret_cast<PfnLatencySleep>(resolved),
+                              std::memory_order_release);
+        return reinterpret_cast<PfnVoidFunction>(&HookedLatencySleep);
+    }
     if (std::strcmp(name, "vkCreateCuModuleNVX") == 0) {
         g_create_cu_module.store(reinterpret_cast<PfnCreateCuModule>(resolved),
                                  std::memory_order_release);
@@ -139,6 +214,10 @@ bool HookResolver(HMODULE loader, const char* name, void* detour,
 }
 
 } // namespace
+
+void SetPresentPacingFix(bool enabled) {
+    g_present_pacing_fix.store(enabled, std::memory_order_release);
+}
 
 bool InstallVulkanHooks() {
     if (g_installed.load(std::memory_order_acquire))
