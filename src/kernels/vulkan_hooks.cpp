@@ -140,9 +140,27 @@ int32_t __stdcall HookedLatencySleep(void* device, uint64_t swapchain, const voi
     return original(device, swapchain, info);
 }
 
+// Whether the game's low-latency request must reach the driver as off. Each
+// check that fails leaves the request as the game made it.
+bool MustTurnLowLatencyOff(const LatencySleepModeInfo& requested, bool frame_generation,
+                           bool game_sleeps) {
+    if (!requested.low_latency_mode)
+        return false; // already off
+    if (!Active())
+        return false; // not an Ampere GPU
+    if (!g_present_pacing_fix.load(std::memory_order_acquire))
+        return false; // PatchFlipMetering=0
+    if (game_sleeps)
+        return false; // the driver waits in vkLatencySleepNV, not in every present
+    // Without generated frames there is one present per frame, which the
+    // driver paces correctly.
+    return frame_generation;
+}
+
 int32_t __stdcall HookedSetLatencySleepMode(void* device, uint64_t swapchain,
                                             const LatencySleepModeInfo* info) {
-    const PfnSetLatencySleepMode original = g_set_latency_sleep_mode.load(std::memory_order_acquire);
+    const PfnSetLatencySleepMode original =
+        g_set_latency_sleep_mode.load(std::memory_order_acquire);
     if (!original)
         return kVkErrorUnknown;
     if (!info)
@@ -150,9 +168,7 @@ int32_t __stdcall HookedSetLatencySleepMode(void* device, uint64_t swapchain,
 
     const bool frame_generation = streamline::FrameGenerationOn();
     const bool game_sleeps = g_latency_sleep_seen.load(std::memory_order_acquire);
-    const bool off = info->low_latency_mode && Active() &&
-                     g_present_pacing_fix.load(std::memory_order_acquire) && !game_sleeps &&
-                     frame_generation;
+    const bool off = MustTurnLowLatencyOff(*info, frame_generation, game_sleeps);
     if (g_low_latency_off.exchange(off, std::memory_order_relaxed) != off)
         log::Event(log::Level::Info, "reflex_present_pacing",
                    {log::Field::Bool("low_latency_off", off),
