@@ -5,6 +5,7 @@
 #include "core/paths.h"
 #include "core/pe.h"
 #include "kernels/substitute.h"
+#include "streamline/streamline.h"
 
 #include <atomic>
 #include <cstring>
@@ -41,20 +42,19 @@ constexpr int32_t kVkErrorUnknown = -13;
 constexpr uint32_t kLoggedFunctionFailures = 16;
 
 using PfnVoidFunction = void(__stdcall*)();
-using PfnGetDeviceProcAddr = PfnVoidFunction(__stdcall*)(void* device, const char* name);
+using PfnGetProcAddr = PfnVoidFunction(__stdcall*)(void* instance_or_device, const char* name);
 using PfnCreateCuModule = int32_t(__stdcall*)(void* device, const CuModuleCreateInfo* info,
                                               const void* allocator, uint64_t* out_module);
 using PfnCreateCuFunction = int32_t(__stdcall*)(void* device, const CuFunctionCreateInfo* info,
                                                 const void* allocator, uint64_t* out_function);
 
-std::atomic<PfnGetDeviceProcAddr> g_get_device_proc_addr{nullptr};
+std::atomic<PfnGetProcAddr> g_get_device_proc_addr{nullptr};
+std::atomic<PfnGetProcAddr> g_get_instance_proc_addr{nullptr};
 std::atomic<PfnCreateCuModule> g_create_cu_module{nullptr};
 std::atomic<PfnCreateCuFunction> g_create_cu_function{nullptr};
 std::atomic<uint32_t> g_function_failures{0};
 std::atomic<bool> g_installed{false};
 std::atomic<bool> g_intercept_reported{false};
-
-thread_local std::vector<uint8_t> t_buffer;
 
 constexpr wchar_t kLoaderName[] = L"vulkan-1.dll";
 
@@ -66,12 +66,9 @@ int32_t __stdcall HookedCreateCuModule(void* device, const CuModuleCreateInfo* i
     if (!info)
         return original(device, info, allocator, out_module);
 
-    Request request;
-    request.route = kRouteVulkan;
-    const void* caller = ODG_RETURN_ADDRESS();
-    request.module = paths::ModuleForAddress(caller);
-    request.caller = paths::ModuleNameForAddress(caller);
-    switch (Decide(info->data, info->data_size, request, t_buffer)) {
+    const Request request = Request::From(kRouteVulkan, ODG_RETURN_ADDRESS());
+    Substitution substitution;
+    switch (Decide(info->data, info->data_size, request, substitution)) {
     case Decision::Unchanged:
         return original(device, info, allocator, out_module);
     case Decision::Refused:
@@ -81,18 +78,13 @@ int32_t __stdcall HookedCreateCuModule(void* device, const CuModuleCreateInfo* i
     case Decision::Substituted:
         break;
     }
-    CuModuleCreateInfo substituted = *info;
-    substituted.data = t_buffer.data();
-    substituted.data_size = t_buffer.size();
-    int32_t status = original(device, &substituted, allocator, out_module);
-    if (status != 0 &&
-        Fallback(info->data, info->data_size, static_cast<uint32_t>(status), request, t_buffer)) {
-        substituted.data = t_buffer.data();
-        substituted.data_size = t_buffer.size();
-        status = original(device, &substituted, allocator, out_module);
-    }
-    ReportDriverResult(static_cast<uint32_t>(status), kRouteVulkan);
-    return status;
+    return CreateSubstituted(info->data, info->data_size, request, substitution,
+                             [&](const std::vector<uint8_t>& image) {
+                                 CuModuleCreateInfo substituted = *info;
+                                 substituted.data = image.data();
+                                 substituted.data_size = image.size();
+                                 return original(device, &substituted, allocator, out_module);
+                             });
 }
 
 // A function the runtime cannot find is the difference between a pipeline that
@@ -111,9 +103,98 @@ int32_t __stdcall HookedCreateCuFunction(void* device, const CuFunctionCreateInf
     return status;
 }
 
+// Reflex on Vulkan (VK_NV_low_latency2). With low-latency mode on, the driver
+// expects a vkLatencySleepNV call every frame. A game that never makes one is
+// paced by the driver inside vkQueuePresentKHR instead, one present at a time.
+// With frame generation on, the presenter makes a present for every displayed
+// frame, generated ones included, so that pacing holds the output to half the
+// refresh rate while the GPU idles. No Man's Sky turns Reflex on and never
+// sleeps. While frame generation is on and no vkLatencySleepNV has been seen,
+// low-latency mode is passed to the driver as off. Otherwise the game's request
+// is passed through; Streamline sends it again on every new swapchain, which
+// is how the game's setting comes back after frame generation is switched off.
+
+// VkLatencySleepModeInfoNV, from VK_NV_low_latency2 in the Vulkan specification.
+struct LatencySleepModeInfo {
+    uint32_t type;
+    const void* next;
+    uint32_t low_latency_mode;
+    uint32_t low_latency_boost;
+    uint32_t minimum_interval_us;
+};
+using PfnSetLatencySleepMode = int32_t(__stdcall*)(void* device, uint64_t swapchain,
+                                                   const LatencySleepModeInfo* info);
+using PfnLatencySleep = int32_t(__stdcall*)(void* device, uint64_t swapchain, const void* info);
+
+std::atomic<PfnSetLatencySleepMode> g_set_latency_sleep_mode{nullptr};
+std::atomic<PfnLatencySleep> g_latency_sleep{nullptr};
+std::atomic<bool> g_latency_sleep_seen{false};
+std::atomic<bool> g_present_pacing_fix{true};
+std::atomic<bool> g_low_latency_off{false};
+
+int32_t __stdcall HookedLatencySleep(void* device, uint64_t swapchain, const void* info) {
+    const PfnLatencySleep original = g_latency_sleep.load(std::memory_order_acquire);
+    if (!original)
+        return kVkErrorUnknown;
+    g_latency_sleep_seen.store(true, std::memory_order_release);
+    return original(device, swapchain, info);
+}
+
+// Whether the game's low-latency request must reach the driver as off. Each
+// check that fails leaves the request as the game made it.
+bool MustTurnLowLatencyOff(const LatencySleepModeInfo& requested, bool frame_generation,
+                           bool game_sleeps) {
+    if (!requested.low_latency_mode)
+        return false; // already off
+    if (!Active())
+        return false; // not an Ampere GPU
+    if (!g_present_pacing_fix.load(std::memory_order_acquire))
+        return false; // PatchFlipMetering=0
+    if (game_sleeps)
+        return false; // the driver waits in vkLatencySleepNV, not in every present
+    // Without generated frames there is one present per frame, which the
+    // driver paces correctly.
+    return frame_generation;
+}
+
+int32_t __stdcall HookedSetLatencySleepMode(void* device, uint64_t swapchain,
+                                            const LatencySleepModeInfo* info) {
+    const PfnSetLatencySleepMode original =
+        g_set_latency_sleep_mode.load(std::memory_order_acquire);
+    if (!original)
+        return kVkErrorUnknown;
+    if (!info)
+        return original(device, swapchain, info);
+
+    const bool frame_generation = streamline::FrameGenerationOn();
+    const bool game_sleeps = g_latency_sleep_seen.load(std::memory_order_acquire);
+    const bool off = MustTurnLowLatencyOff(*info, frame_generation, game_sleeps);
+    if (g_low_latency_off.exchange(off, std::memory_order_relaxed) != off)
+        log::Event(log::Level::Info, "reflex_present_pacing",
+                   {log::Field::Bool("low_latency_off", off),
+                    log::Field::Bool("frame_generation", frame_generation),
+                    log::Field::Bool("game_sleeps", game_sleeps)});
+    if (!off)
+        return original(device, swapchain, info);
+    LatencySleepModeInfo sent = *info;
+    sent.low_latency_mode = 0;
+    sent.low_latency_boost = 0;
+    return original(device, swapchain, &sent);
+}
+
 PfnVoidFunction Intercept(const char* name, PfnVoidFunction resolved) {
     if (!resolved || !name)
         return resolved;
+    if (std::strcmp(name, "vkSetLatencySleepModeNV") == 0) {
+        g_set_latency_sleep_mode.store(reinterpret_cast<PfnSetLatencySleepMode>(resolved),
+                                       std::memory_order_release);
+        return reinterpret_cast<PfnVoidFunction>(&HookedSetLatencySleepMode);
+    }
+    if (std::strcmp(name, "vkLatencySleepNV") == 0) {
+        g_latency_sleep.store(reinterpret_cast<PfnLatencySleep>(resolved),
+                              std::memory_order_release);
+        return reinterpret_cast<PfnVoidFunction>(&HookedLatencySleep);
+    }
     if (std::strcmp(name, "vkCreateCuModuleNVX") == 0) {
         g_create_cu_module.store(reinterpret_cast<PfnCreateCuModule>(resolved),
                                  std::memory_order_release);
@@ -130,11 +211,28 @@ PfnVoidFunction Intercept(const char* name, PfnVoidFunction resolved) {
 }
 
 PfnVoidFunction __stdcall HookedGetDeviceProcAddr(void* device, const char* name) {
-    PfnGetDeviceProcAddr original = g_get_device_proc_addr.load(std::memory_order_acquire);
+    PfnGetProcAddr original = g_get_device_proc_addr.load(std::memory_order_acquire);
     return original ? Intercept(name, original(device, name)) : nullptr;
 }
 
+PfnVoidFunction __stdcall HookedGetInstanceProcAddr(void* instance, const char* name) {
+    PfnGetProcAddr original = g_get_instance_proc_addr.load(std::memory_order_acquire);
+    return original ? Intercept(name, original(instance, name)) : nullptr;
+}
+
+// Hooks one of the loader's exported resolvers. The export may be a jump stub,
+// which is followed to the function it leads to.
+bool HookResolver(HMODULE loader, const char* name, void* detour,
+                  std::atomic<PfnGetProcAddr>& slot) {
+    void* exported = hooks::detail::Export(loader, name);
+    return exported && hooks::Install(pe::ResolveJumpThunk(exported), detour, slot, name);
+}
+
 } // namespace
+
+void SetPresentPacingFix(bool enabled) {
+    g_present_pacing_fix.store(enabled, std::memory_order_release);
+}
 
 bool InstallVulkanHooks() {
     if (g_installed.load(std::memory_order_acquire))
@@ -152,23 +250,33 @@ bool InstallVulkanHooks() {
         return true;
     }
 
-    // The extension functions are exported by nobody; vkGetDeviceProcAddr hands
-    // them out, so that is where they are taken over. The export may be a jump
-    // stub, which is followed to the function it leads to. vkGetInstanceProcAddr
-    // is left alone: it serves global and instance commands on much hotter
-    // paths, and a device extension function does not come from it.
-    void* exported = hooks::detail::Export(module, "vkGetDeviceProcAddr");
-    if (!exported || !hooks::Install(pe::ResolveJumpThunk(exported),
+    // The extension functions are exported by nobody; the loader's resolvers
+    // hand them out, so that is where they are taken over. Both resolvers can
+    // answer for a device function: vkGetInstanceProcAddr returns a trampoline
+    // that dispatches through the device. A resolution through the one left
+    // unhooked would hand the driver an image this GPU cannot run, so both are
+    // hooked, and each only compares the name it was asked for.
+    const bool device = HookResolver(module, "vkGetDeviceProcAddr",
                                      reinterpret_cast<void*>(&HookedGetDeviceProcAddr),
-                                     g_get_device_proc_addr, "vkGetDeviceProcAddr")) {
+                                     g_get_device_proc_addr);
+    const bool instance = HookResolver(module, "vkGetInstanceProcAddr",
+                                       reinterpret_cast<void*>(&HookedGetInstanceProcAddr),
+                                       g_get_instance_proc_addr);
+    if (!device || !instance) {
         // Attempted once: a hook that fails to install on a loaded, pinned
         // loader will not start working.
-        log::Event(log::Level::Warning, "vulkan_hooks_unavailable",
-                   {log::Field::Str("note", "the Vulkan loader could not be hooked. Direct3D 12 "
-                                            "games are unaffected; a Vulkan game's frame "
-                                            "generation will have no kernels it can run.")});
-        FreeLibrary(module);
-        return false;
+        // An unhooked resolver can hand out the extension function unwrapped,
+        // so this is a failure even when the other one works.
+        log::Event(log::Level::Error, "vulkan_hooks_unavailable",
+                   {log::Field::Bool("device_resolver", device),
+                    log::Field::Bool("instance_resolver", instance),
+                    log::Field::Str("note", "the Vulkan loader could not be fully hooked. "
+                                            "Direct3D 12 games are unaffected; a Vulkan game's "
+                                            "frame generation may have no kernels it can run.")});
+        if (!device && !instance) {
+            FreeLibrary(module);
+            return false;
+        }
     }
     log::Event(log::Level::Info, "vulkan_hooks_installed",
                {log::Field::Str("module", paths::ModuleFileName(module).c_str())});

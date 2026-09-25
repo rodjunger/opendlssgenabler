@@ -1,5 +1,6 @@
 #include "core/pe.h"
 
+#include "core/paths.h"
 #include "core/x86.h"
 
 #include <libhat/process.hpp>
@@ -19,15 +20,6 @@ std::vector<std::span<const std::byte>> ReadableSections(HMODULE module) {
         return true;
     });
     return sections;
-}
-
-HMODULE ModuleOf(const void* address) {
-    HMODULE module = nullptr;
-    if (!address || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                        static_cast<LPCWSTR>(address), &module))
-        return nullptr;
-    return module;
 }
 
 bool PatchCode(const void* code, const void* bytes, size_t size) {
@@ -67,26 +59,20 @@ bool RangeReadable(const void* address, size_t size) {
 bool SafeCopy(void* destination, const void* source, size_t size) {
     if (!destination || !source || size == 0)
         return false;
-#ifdef _MSC_VER
-    __try {
-        std::memcpy(destination, source, size);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-#else
+    // Checked rather than caught: the MinGW toolchains have no structured
+    // exception handling for C++. The range can in principle change between
+    // the check and the copy, which nothing this reads does in practice.
     if (!RangeReadable(source, size))
         return false;
     std::memcpy(destination, source, size);
     return true;
-#endif
 }
 
 void* ResolveJumpThunk(void* address) {
     const auto thunk = x86::Decode(static_cast<const std::byte*>(address));
     const auto target = thunk ? x86::JumpTarget(*thunk) : std::nullopt;
-    const HMODULE module = ModuleOf(address);
-    if (!target || !module || ModuleOf(*target) != module)
+    const HMODULE module = paths::ModuleForAddress(address);
+    if (!target || !module || paths::ModuleForAddress(*target) != module)
         return address;
     return const_cast<std::byte*>(*target);
 }

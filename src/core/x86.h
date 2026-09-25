@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 // Decoding of single x86-64 instructions, on top of HDE64, the decoder MinHook
 // bundles. Callers ask what an instruction does, not how it is encoded.
@@ -26,6 +27,19 @@ struct ByteStore {
     uint8_t value = 0;
 };
 std::optional<ByteStore> AsByteStore(const Instruction& instruction);
+
+// `mov byte ptr [register + disp32], r8`: a store of a byte register to such a
+// field. Returns the displacement; empty for anything else.
+std::optional<int32_t> AsRegisterByteStore(const Instruction& instruction);
+
+// The register store `instruction` rewritten to store the constant `value` to
+// the same field, as `mov byte ptr [register + disp32], imm8`. Empty unless the
+// new encoding is exactly as long as the old one, so it can replace it in
+// place. It fits when the old store needed a REX prefix only for its source
+// register (`sil`, `dil`, `bpl`, `spl`, `r8b` and up), since the immediate form
+// has no source register and drops that byte.
+std::optional<std::vector<std::byte>> AsImmediateByteStore(const Instruction& instruction,
+                                                           uint8_t value);
 
 // The address a `[rip + disp32]` memory operand refers to, such as the string
 // a `lea` loads. Empty for an instruction without one.

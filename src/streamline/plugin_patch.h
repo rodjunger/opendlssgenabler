@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 // In-memory patches to the Streamline DLSS-G plugin (sl.dlss_g.dll). They are
@@ -18,6 +19,10 @@
 // off value. That store tells us where the flag is and what off means, both of
 // which change between plugin builds. Every store of the opposite value to the
 // flag is then changed to store the off value.
+//
+// Newer plugins set the flag to its on value right after reading the NGX
+// parameter DLSSG.ModelVersion, and some builds store it from a register
+// rather than as a constant. That store is rewritten to store the off value.
 //
 // Frame-count clamp. The plugin limits the generated-frame count with
 // `mov edx, limit; cmp ecx, edx; cmovb edx, ecx`. Replacing the cmovb with a
@@ -33,7 +38,17 @@ struct PluginAnalysis {
     struct FlipMetering {
         int32_t flag_offset = 0; // the flag's offset within the plugin's context
         uint8_t off_value = 0;
-        std::vector<const std::byte*> opposite_stores; // immediates to rewrite
+        // Code to overwrite so that nothing can set the flag to its on value.
+        struct Rewrite {
+            const std::byte* address = nullptr;
+            std::vector<std::byte> bytes;
+        };
+        std::vector<Rewrite> rewrites;
+        // How the store after the DLSSG.ModelVersion check was handled:
+        // "absent", "constant" (among the rewrites when it stores the on
+        // value), "register" (rewritten), or "unfit" (left, it cannot be
+        // rewritten in place).
+        const char* model_version_store = "absent";
     };
     struct FrameClamp {
         uint32_t limit = 0;              // the plugin's compiled maximum
@@ -47,6 +62,8 @@ struct PluginAnalysis {
 
 // Finds the patch sites in a loaded sl.dlss_g.dll. Changes nothing.
 PluginAnalysis AnalyzePlugin(HMODULE plugin);
+// The same, over `code` within `image`, the span the marker string is found in.
+PluginAnalysis AnalyzePlugin(std::span<const std::byte> image, std::span<const std::byte> code);
 
 // Selects which patches apply. Either can be turned off to isolate a fault.
 void SetPatchesEnabled(bool flip_metering, bool frame_clamp);

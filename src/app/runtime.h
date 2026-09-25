@@ -2,11 +2,11 @@
 
 #include <windows.h>
 
-// Lifecycle entry points driven by DllMain. Initialize runs once, off the
-// loader-lock path where it can, and wires up configuration, logging and hooks.
+// Driven by DllMain. Initialize runs once, on a thread of its own, and wires up
+// configuration, logging and hooks. There is no matching shutdown: the proxy is
+// pinned, so it is only unloaded when the process exits.
 namespace odg::app {
 
 void Initialize(HMODULE self);
-void Shutdown();
 
 } // namespace odg::app

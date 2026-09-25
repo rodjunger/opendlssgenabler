@@ -42,12 +42,7 @@ function(add_proxy dll_name)
         "${GENERATED_DIR}/${dll_name}_proxy.gen.cpp")
     target_link_libraries(${target} PRIVATE odg_core odg_warnings)
     set_target_properties(${target} PROPERTIES PREFIX "" OUTPUT_NAME "${dll_name}")
-    if(MSVC)
-        target_sources(${target} PRIVATE "${GENERATED_DIR}/${dll_name}.def")
-    else()
-        target_link_options(${target} PRIVATE
-            "${GENERATED_DIR}/${dll_name}.def")
-    endif()
+    target_link_options(${target} PRIVATE "${GENERATED_DIR}/${dll_name}.def")
 endfunction()
 
 add_proxy(version)

@@ -31,6 +31,11 @@ std::wstring ParentDirectory(const std::wstring& path);
 
 bool FileNameEqualsInsensitive(const std::wstring& path, const wchar_t* name);
 
+// Loads `name` from the Windows system directory, never from the game's folder.
+// This engine is itself loaded under the name of a system DLL, so a plain load
+// by name could find it instead of the real one.
+HMODULE LoadSystemLibrary(const wchar_t* name);
+
 // The file name that says which NVIDIA component a module is.
 //
 // NGX can replace a Streamline plugin or a feature runtime a game ships with a

@@ -15,16 +15,13 @@ namespace odg::pe {
 // Empty when `module` is not a loaded image.
 std::vector<std::span<const std::byte>> ReadableSections(HMODULE module);
 
-// The loaded module containing `address`, or null for memory outside any image,
-// such as code another tool allocated.
-HMODULE ModuleOf(const void* address);
-
 // Overwrites code after switching the page to writable and flushing the
 // instruction cache. Restores the previous protection on success. Code is mapped
 // read-only, so it is addressed as const like everywhere else it is read.
 bool PatchCode(const void* address, const void* bytes, size_t size);
 
-// memcpy that swallows an access violation rather than crashing the host.
+// memcpy that refuses, rather than faulting on, a source that is not committed
+// readable memory.
 bool SafeCopy(void* destination, const void* source, size_t size);
 
 // Follows a jump thunk (`jmp rel32` or `jmp [rip + rel32]`) to the function it

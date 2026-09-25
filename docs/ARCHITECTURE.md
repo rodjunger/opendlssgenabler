@@ -1,22 +1,14 @@
 # How opendlssg-fg works
 
-This project enables NVIDIA's DLSS Frame Generation on RTX 30. It does not
-implement frame generation: every generated frame is produced by the game's own
-copy of NVIDIA's DLSS-G runtime, by the same code an RTX 40 would run. What
-follows is only about the restrictions that stop that code running on an older
-card.
+opendlssg-fg enables DLSS Frame Generation (DLSS-G) on RTX 30. It does not
+generate frames itself: the game's own copy of NVIDIA's DLSS-G runtime does,
+running the same code as on RTX 40. This project removes the two things that
+stop that code running on Ampere:
 
-DLSS Frame Generation (DLSS-G) runs on RTX 40 and 50 cards. NVIDIA withholds it
-from RTX 30 in two ways, and both have to be undone before a single frame is
-generated:
-
-1. **The software stack refuses to offer it.** Several components compare the
-   GPU's architecture against Ada and switch the feature off when it is older.
-2. **The runtime has no kernels an RTX 30 can execute.** DLSS-G is a set of CUDA
-   kernels, and the ones NVIDIA hands to the driver are built for Ada only.
-
-This document explains what each component does, where the engine intervenes,
-what it changes, and why each change is safe.
+1. **The software refuses to offer it.** Several components compare the GPU
+   architecture against Ada and turn the feature off below it.
+2. **The runtime has no kernels Ampere can run.** DLSS-G is a set of CUDA
+   kernels, and the ones it hands to the driver are built for Ada.
 
 - [The components](#the-components)
 - [What is changed, and where](#what-is-changed-and-where)
@@ -25,117 +17,177 @@ what it changes, and why each change is safe.
 - [Gate 2: the availability check](#gate-2-the-availability-check)
 - [Gate 3: frame pacing](#gate-3-frame-pacing)
 - [Gate 4: kernels](#gate-4-kernels)
+- [Multi-frame generation](#multi-frame-generation)
 - [Scope and safety](#scope-and-safety)
 - [Diagnosing a problem](#diagnosing-a-problem)
 - [Source map](#source-map)
 
 ## The components
 
-A DLSS-G game ships NVIDIA's Streamline integration and the DLSS-G runtime. The
-driver supplies NVAPI, the NGX core and CUDA.
+The game ships Streamline and the DLSS-G runtime. The driver supplies NVAPI,
+the NGX core and CUDA. Each component makes its own decision about the GPU,
+which is why there are several gates rather than one.
 
-| Component | File | Ships with | Role |
-|---|---|---|---|
-| Streamline interposer | `sl.interposer.dll` | game | Entry point the game calls; loads plugins |
-| Streamline common | `sl.common.dll` | game | Reads system capabilities, decides which plugins run |
-| DLSS-G plugin | `sl.dlss_g.dll` | game | Streamline's wrapper around frame generation; paces output |
-| DLSS-G runtime | `nvngx_dlssg.dll` | game | NVIDIA's frame generation itself: the CUDA kernels |
-| NGX core | `_nvngx.dll` | driver | Loads NGX runtimes and answers capability queries |
-| NVAPI | `nvapi64.dll` | driver | Driver API; reports the GPU architecture |
-| CUDA driver | `nvcuda.dll` | driver | Compiles and runs kernels |
+| Component | File | Ships with | Responsible for | Decides, from the GPU architecture |
+|---|---|---|---|---|
+| Streamline interposer | `sl.interposer.dll` | game | The API the game calls; loads plugins | Nothing |
+| Streamline common | `sl.common.dll` | game | Reads system capabilities | Which plugins may load (gate 1) |
+| DLSS-G plugin | `sl.dlss_g.dll` | game | Streamline's wrapper around frame generation; presents and paces frames | Hardware or software pacing (gate 3) |
+| NGX core | `_nvngx.dll` | driver | Loads NGX runtimes, answers capability queries | Whether DLSS-G is available (gate 2) |
+| DLSS-G runtime | `nvngx_dlssg.dll` | game | Frame generation itself: a set of CUDA kernels | Which kernel builds to use (gate 4); how many frames (multi-frame) |
+| NVAPI | `nvapi64.dll` | driver | Driver API; reports the architecture; creates CUDA kernels under Direct3D 12 | Nothing; it is the source of the answer |
+| CUDA driver | `nvcuda.dll` | driver | Compiles and runs kernels | Nothing |
+
+The project is a DLL the game already loads by name (`version.dll`,
+`winmm.dll`, `dinput8.dll` or `dxgi.dll`). It forwards every export to the real
+system DLL, so the game works normally, and changes the game's process in the
+places below.
+
+## What is changed, and where
+
+Nothing on disk is modified. All changes are in memory, in the game's process,
+and only on Ampere. Dashed boxes are this project; everything else is NVIDIA's.
 
 ```mermaid
 flowchart LR
     game["Game"] --> interposer["sl.interposer"]
-    interposer --> common["sl.common"]
-    interposer --> plugin["sl.dlss_g"]
-    plugin --> ngx["_nvngx (NGX core)"]
-    ngx --> runtime["nvngx_dlssg (runtime)"]
-    common --> nvapi["nvapi64"]
-    ngx --> nvapi
-    runtime --> nvapi
-    runtime -- "D3D12: NvAPI cubin shaders" --> driver[("GPU driver")]
-    runtime -- "Vulkan: VK_NVX_binary_import" --> driver
+    interposer --> common["sl.common<br/>gate 1: load sl.dlss_g?"]
+    interposer --> plugin["sl.dlss_g<br/>gate 3: which pacing?"]
+    plugin --> ngx["_nvngx<br/>gate 2: DLSS-G available?"]
+    ngx --> runtime["nvngx_dlssg<br/>gate 4: which kernels?<br/>how many frames?"]
+
+    common -- "GetArchInfo" --> arch
+    ngx -- "GetArchInfo" --> arch
+    runtime -- "GetArchInfo" --> arch
+    arch{{"hook: NvAPI_GPU_GetArchInfo<br/>calls the real function, then<br/>answers Ada to these three only"}} --> nvapi["nvapi64"]
+
+    pace{{"patch: every flag write<br/>selects software pacing"}} -.- plugin
+    mfg{{"patch: Blackwell comparisons<br/>compare against Ada"}} -.- runtime
+
+    runtime -- "create kernel<br/>(Ada image)" --> kern{{"hook: kernel creation<br/>swaps in an Ampere image"}}
+    kern -- "runnable image" --> driver[("GPU driver")]
+
+    classDef ours stroke-width:3px,stroke-dasharray:6 3
+    class arch,pace,mfg,kern ours
 ```
 
-The engine is a DLL the game already loads by name (`version.dll`, `winmm.dll`,
-`dinput8.dll` or `dxgi.dll`). It forwards every export to the real system DLL, so
-the game behaves normally, and from there hooks the handful of functions listed
-below.
+Read it left to right. The fake architecture opens gates 1 and 2, and makes the
+runtime run at all. But telling the plugin and the runtime they are on Ada also
+makes them choose Ada-only paths, so each of those choices is corrected where it
+is made: the pacing flag, and the kernels handed to the driver.
 
-## What is changed, and where
-
-Nothing on disk is modified. Every change is made in memory, in the game's own
-process, and only on a GPU that needs it.
-
-| # | Where | What is changed | Why |
+| # | Where | Change | Why |
 |---|---|---|---|
-| 1 | `nvapi64` `NvAPI_GPU_GetArchInfo` | Answers Ada instead of Ampere, to three named callers only | Opens gates 1 and 2 |
-| 2 | `nvapi64` `NvAPI_D3D12_SetRawScgPriority` | Answered with success, not executed | An Ada-only call that removes the device on older hardware |
-| 3 | `sl.dlss_g` flip-metering flag writes | Forced to the plugin's own software-pacing value | Gate 3: Ampere has no hardware flip metering |
+| 1 | `nvapi64` `NvAPI_GPU_GetArchInfo` | Returns Ada instead of Ampere, to three callers only | Gates 1 and 2 |
+| 2 | `nvapi64` `NvAPI_D3D12_SetRawScgPriority` | Returns success without running | Ada-only call that removes the device on older GPUs |
+| 3 | `sl.dlss_g` flip-metering flag writes | Set to the plugin's software-pacing value | Gate 3: Ampere has no hardware flip metering |
 | 3b | `nvngx_dlssg` comparisons against the Blackwell id | Compare against Ada instead | [Multi-frame](#multi-frame-generation): 3x and above |
 | 4 | `nvapi64` `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Kernel image replaced | Gate 4, Direct3D 12, one cubin at a time |
 | 4b | `nvapi64` `NvAPI_D3D12_CreateCuModule` | Fatbin replaced | Gate 4, Direct3D 12, runtimes from 310.7 |
-| 5 | Vulkan loader `vkGetDeviceProcAddr` | Hands out a wrapper for `vkCreateCuModuleNVX` | Gate 4, Vulkan route |
-| 6 | `kernel32` `LoadLibraryExW` | Wakes the engine's worker when a library loads; applies 3b inside the runtime's load | Timing |
-| 7 | `sl.interposer` exports | Observed and logged | Diagnostics; see [below](#diagnosing-a-problem) |
+| 5 | Vulkan loader `vkGetDeviceProcAddr` and `vkGetInstanceProcAddr` | Return a wrapper for `vkCreateCuModuleNVX` | Gate 4, Vulkan |
+| 5b | Vulkan loader, through #5 | Return wrappers for `vkSetLatencySleepModeNV` and `vkLatencySleepNV`; low-latency mode off while frame generation is on and the game has not slept | [Reflex and present pacing](#reflex-and-present-pacing) |
+| 6 | `kernel32` `LoadLibraryExW` | Wakes the worker thread on each load; applies 3b while the runtime loads | Timing |
+| 7 | `sl.interposer` exports | Logged only | [Diagnostics](#diagnosing-a-problem) |
 
-Optional and off by default: lifting the plugin's frame-count clamp
-(`PatchFrameClamp`), forcing a multiplier (`ForceMultiplier`), and loading a
-different runtime (`[Runtime] Mode=Bundled`). A redirected runtime runs under
-the file name it was configured as, so that name joins the callers told Ada;
-without it the runtime is told the truth and creates no kernels.
+Two kinds of change are used. A **hook** redirects a function to this project's
+code, which usually calls the original and adjusts its inputs or result
+(MinHook inline hooks). A **patch** rewrites a few instruction bytes inside
+NVIDIA's code, found by signature, so that code makes a different choice.
+
+Off by default: lifting the plugin's frame-count clamp (`PatchFrameClamp`),
+forcing a multiplier (`ForceMultiplier`), and loading a different runtime
+(`[Runtime] Mode=Bundled`). A redirected runtime runs under its configured file
+name, so that name is added to the callers told Ada.
 
 ## Startup: opening the gates in time
 
-Streamline reads the GPU architecture **once**, within the first hundred
-milliseconds of its startup, and every later decision compares against that
-record. A hook installed after that moment has no effect, however correct it is.
+Streamline reads the GPU architecture once, in the first hundred milliseconds,
+and uses that value from then on. A hook installed later has no effect.
 
-`nvapi64.dll` usually arrives as a static import of `sl.common.dll`, so it never
-passes through `LoadLibrary` under its own name. The engine therefore maps
-`nvapi64.dll` itself, early, on its own thread, and hooks it there. Whoever loads
-it afterwards receives a module that is already hooked.
+NVAPI exports a single function, `nvapi_QueryInterface`, which returns the
+address of any other NVAPI function from a numeric id. `nvapi64.dll` is usually
+a static import of `sl.common.dll`, so it never goes through `LoadLibrary` by
+name. The project therefore loads `nvapi64.dll` itself, early, on its own
+thread, asks it for `NvAPI_GPU_GetArchInfo`, and hooks that function in place.
+Every caller, whenever it resolved the function, then goes through the hook.
 
 ```mermaid
 sequenceDiagram
-    participant G as Game
-    participant E as Engine (own thread)
+    autonumber
+    participant L as Windows loader
+    participant P as Proxy DllMain
+    participant W as Proxy worker thread
+    participant N as nvapi64 (hooked)
     participant C as sl.common
-    participant N as nvapi64
+    participant O as Any other module
 
-    G->>E: loads version.dll (proxy)
-    E->>N: LoadLibrary, then hook GetArchInfo
-    G->>C: loads Streamline
+    L->>P: map version.dll, call DllMain (loader lock held)
+    P->>P: pin: Windows may never unload this DLL
+    P->>P: load the real version.dll, fill the forwarding table
+    P->>W: start worker thread
+    Note over P: DllMain returns without installing any hook
+    W->>N: LoadLibrary("nvapi64.dll")
+    W->>N: nvapi_QueryInterface(GetArchInfo id)
+    W->>N: inline hook on the returned function
     C->>N: NvAPI_GPU_GetArchInfo
-    N-->>E: 0x170 (Ampere)
-    E-->>C: 0x190 (Ada)
+    Note over N: hook calls the real function: 0x170 (Ampere)<br/>return address is inside sl.common: on the list
+    N-->>C: 0x190 (Ada)
     C->>C: adapter mask 0x1, sl.dlss_g loads
-    Note over G,C: frame generation is offered
+    O->>N: NvAPI_GPU_GetArchInfo
+    Note over N: return address not on the list
+    N-->>O: 0x170 (Ampere), unchanged
 ```
 
-Two rules keep installation safe:
+What `DllMain` does, step by step:
 
-- **No hook is installed under the loader lock.** Installing an inline hook
-  briefly suspends every other thread; doing that while a thread is inside
-  `LoadLibrary` can deadlock it. The `LoadLibraryExW` hook only wakes a worker
-  thread, and the worker does the rest.
-- **The original function is published before the hook goes live.** Otherwise a
-  thread arriving in between reaches a hook with nothing to call through to. On
-  `LoadLibraryExW` that fails a DLL load the game asked for. `hooks::Install` is
-  the only way the engine installs a hook, and it always publishes first.
+- **Pin.** `GetModuleHandleExW` with `GET_MODULE_HANDLE_EX_FLAG_PIN` makes the
+  proxy impossible to unload. Hooks keep pointing into its code for the rest of
+  the process, so a game that calls `FreeLibrary` on it must not unmap it.
+- **Fill the forwarding table.** Every export of the proxy is a small stub that
+  jumps through a table entry (generated by `tools/gen_proxy.py`). `DllMain`
+  loads the real system DLL from `System32` and writes the address of each of
+  its functions into the table, before the game can call any of them. After
+  that the game's calls to `version.dll` reach the real one.
+- **Hand off.** Everything else runs on the worker thread, because `DllMain`
+  runs under the loader lock (see the rules below).
+
+The worker then watches for NVIDIA's modules for the rest of the process. It
+lists the loaded modules when the `LoadLibraryExW` hook wakes it, and once a
+second otherwise, because a module loaded as a static import never passes
+through `LoadLibraryExW`. Each pass is a *module scan*: any new NVIDIA
+component it finds is identified, pinned and patched or hooked.
+
+The caller of `GetArchInfo` is identified by the module that contains the
+hook's return address, mapped back to the component it is (see
+[who is told](#who-is-told-and-who-must-not-be)).
+
+Two rules for installing hooks:
+
+- **No inline hook under the loader lock.** The loader lock is the process-wide
+  lock Windows holds while it loads a DLL and runs its `DllMain`. Installing an
+  inline hook briefly suspends every other thread; if one of them is waiting on
+  that lock, or holds it, the process can deadlock. So `DllMain` and the
+  `LoadLibraryExW` hook only start or wake the worker thread, which installs
+  hooks outside the lock.
+- **Publish the trampoline before enabling the hook.** An inline hook overwrites
+  the start of the target function with a jump to our code. The overwritten
+  instructions are moved into a *trampoline*, which our code calls to run the
+  original function. Its address must be stored before the jump goes live, or a
+  thread arriving in between reaches our code with nothing to call; on
+  `LoadLibraryExW` that fails a load the game asked for. `hooks::Install`
+  always does this in order.
 
 ## Gate 1: the adapter mask
 
-`sl.common` records each adapter's architecture, then computes, for every plugin,
-a mask of the adapters it may run on:
+`sl.common` records each adapter's architecture and computes, per plugin, a mask
+of adapters it may run on:
 
 ```
 adapters[i].architecture >= info.minGPUArchitecture
 ```
 
-For DLSS-G the minimum is Ada, `0x190`. With the real value, Ampere `0x170`, the
-mask is empty, the plugin is dropped, and the game never offers the option:
+DLSS-G requires Ada, `0x190`. With Ampere's real `0x170` the mask is empty and
+the plugin is dropped:
 
 ```
 getSystemCaps] Adapter 0 architecture 0x170
@@ -143,7 +195,7 @@ mapPlugins] Loaded plugin 'sl.dlss_g' - adapter mask 0x0
 loadPlugins] Ignoring plugin 'sl.dlss_g' since it is not supported on this platform
 ```
 
-With the answer rewritten:
+With the spoof:
 
 ```
 getSystemCaps] Adapter 0 architecture 0x190
@@ -152,117 +204,220 @@ mapPlugins] Loaded plugin 'sl.dlss_g' - adapter mask 0x1
 
 ### Who is told, and who must not be
 
-The rewrite is scoped by caller, identified from the return address. Three
-modules are told Ada; everything else, **including the game**, sees the real
-hardware.
+The caller is identified from the return address. Three modules are told Ada;
+everything else, including the game, sees the real GPU.
 
 | Caller | Told | Reason |
 |---|---|---|
 | `sl.common.dll` | Ada | Computes the adapter mask (gate 1) |
 | `_nvngx.dll` | Ada | Answers the availability query (gate 2) |
-| `nvngx_dlssg.dll` | Ada | The runtime; does not create its kernels otherwise |
+| `nvngx_dlssg.dll` | Ada | The runtime; creates no kernels otherwise |
 | the game, `sl.interposer`, `nvngx_dlss`, `nvngx_dlssd` | real | See below |
 
-A caller is identified by the component it is, not by the file name it carries.
-NGX keeps downloaded copies of Streamline plugins and feature runtimes in
-`%ProgramData%\NVIDIA\NGX\models\<component>\versions\<build>\files`, named
-`<architecture>_<application id>.dll`, and Streamline loads one in preference to
-the copy a game ships. In Halo Campaign Evolved the downloaded `sl.common` was
-the only one that ran, so matching on file names alone left the caller that
-computes the adapter mask unscoped, it read Ampere, and every DLSS-G plugin was
-disabled before the game could offer the option. `paths::ComponentFileName` maps
-such a path back to the module the component ships as. The same rule finds the
-frame-generation runtime itself, which NGX stores under that scheme with a
-`.bin` extension; looking for the file name `nvngx_dlssg.dll` misses it, and
-then neither its multi-frame gates nor its kernels are handled.
+Callers are matched by component, not file name. NGX downloads replacement
+plugins and runtimes to
+`%ProgramData%\NVIDIA\NGX\models\<component>\versions\<build>\files` as
+`<architecture>_<application id>.dll` (`.bin` for runtimes), and Streamline
+prefers them over the game's copies. In Halo Campaign Evolved only the
+downloaded `sl.common` ran; matching by file name missed it and the plugin was
+disabled. `paths::ComponentFileName` maps such a path back to the component's
+module name.
 
-Scoping is not a refinement. In PRAGMATA with path tracing on, telling every
-caller Ada removed the device before the main menu (`DXGI_ERROR_DEVICE_REMOVED`),
-with nothing in any log pointing at frame generation; telling only these three
-does not. The game itself never asked in either tested title. The callers that
-did, and were told Ada only in the failing case, are the upscaling runtimes (DLSS
-Super Resolution and Ray Reconstruction), which pick architecture-specific code
-paths from the answer.
+The scope matters. In PRAGMATA with path tracing on, telling every caller Ada
+removed the device before the main menu (`DXGI_ERROR_DEVICE_REMOVED`). The
+only extra callers in that run were the DLSS Super Resolution and Ray
+Reconstruction runtimes, which choose architecture-specific code from the
+answer.
 
 ## Gate 2: the availability check
 
-With the plugin loaded, its startup asks the NGX core whether DLSS-G is
-available. The NGX core checks the architecture on its own, which is why
-`_nvngx.dll` is on the list above. Without it:
+At startup the plugin asks the NGX core whether DLSS-G is available, and the NGX
+core checks the architecture itself. Without `_nvngx.dll` on the list:
 
 ```
 dlss_gEntry.cpp [slOnPluginStartup] NGX indicates DLSS-G is not available - DLSS-G cannot run
 ```
 
-With it, the plugin starts and the game can switch frame generation on:
+With it:
 
 ```
 dlss_gEntry.cpp [slOnPluginStartup] Multi-frame supported, max generated frames 3 (NGX feature supports 1)
 dlss_gEntry.cpp [slSetData] slDLSSGSetOptions() is called
 ```
 
-`NGX feature supports 1` is the runtime's own limit: it offers more than one
-generated frame only on Blackwell. See [multi-frame generation](#multi-frame-generation).
+`NGX feature supports 1` is the runtime's own limit; see
+[multi-frame generation](#multi-frame-generation).
 
 ## Gate 3: frame pacing
 
-Ada and newer pace generated frames with hardware flip metering. Ampere has none.
-Because the plugin believes it is on Ada, it would choose hardware metering, and
-the generated frames would never be shown.
+**The problem.** With frame generation, the game renders one frame and the
+runtime adds one or more generated frames between it and the previous one.
+They only look smooth if they are shown at even intervals. That timing is
+called *pacing*.
 
-The plugin already carries a software fallback. It takes it when it detects an
-older frame-generation runtime: right after logging `FG1 DLL has been detected`,
-it writes its metering flag to the off state. The engine finds that log string,
-finds the code that references it, and reads the write that follows. That gives
-the flag's offset and its off value, which change from one plugin build to the
-next:
+The plugin can pace in two ways:
 
-| Game | Plugin write after the marker | Flag | Off value |
+- **Hardware flip metering.** The plugin queues the frames with target times,
+  and the GPU's display hardware shows ("flips") each one at its time. Newer
+  GPUs have this; Ampere does not.
+- **Software pacing.** The plugin times the presents itself on the CPU. This
+  works on any GPU.
+
+The plugin chooses by the GPU it believes it is on. Told Ada, it picks hardware
+metering, which Ampere cannot do: under Direct3D 12 the generated frames are
+never shown.
+
+On Vulkan the plugin meters presents through `VK_NV_present_metering` when the
+driver lists it. Driver 616.92 lists it on the RTX 3080. The flag below does not
+change this, and frame generation works with it. On Vulkan, Reflex pacing is
+what breaks; see [below](#reflex-and-present-pacing).
+
+**The fix.** The plugin already contains the software path. It takes it when it
+detects an older frame-generation runtime: right after logging
+`FG1 DLL has been detected`, it stores a byte to a flag in its context
+structure, and that value means "no hardware metering". The project reuses that
+decision everywhere:
+
+1. Find the string `FG1 DLL has been detected` in the plugin.
+2. Find the instruction that loads its address (`lea reg, [rip+string]`),
+   using libhat.
+3. Decode forward with HDE64 to the first byte store after it, for example
+   `mov byte ptr [rbx+0x38bc], 0`. Its offset is the flag; its value is "off".
+4. Find every other store to the same offset with the opposite value, and
+   change its immediate byte to the off value.
+5. Newer builds read the NGX parameter `DLSSG.ModelVersion` and store the
+   result to the flag: on for version `0x200` or above. Some builds store it
+   from a register (`mov byte ptr [rbx+0x4520], dil`), which step 4 cannot
+   find. That store is rewritten in place to store the off value, but only if
+   the new instruction is exactly as long. `model_version_store` in
+   `flip_metering_forced` says what was found: `absent`, `constant` (already
+   covered by step 4), `register` (rewritten) or `unfit` (left unchanged).
+
+After that, no store the analysis found can set the flag to "on".
+
+**Why the value is read, not assumed.** The flag's offset and its off value both
+change between plugin builds, so neither can be hard-coded. `patchprobe` run
+on the plugin copies installed on the test machine gives:
+
+| Plugin build | Flag offset | Off value | Stores rewritten |
 |---|---|---|---|
-| PRAGMATA | `mov byte ptr [rbx+0x38bc], 0` | `0x38bc` | 0 |
-| DOOM The Dark Ages | `mov byte ptr [rbx+0x44a0], 1` | `0x44a0` | 1 |
+| NGX 132874, 133131, 133132 (PRAGMATA's generation) | `0x38bc` | 0 | 2 |
+| NGX 133632 to 133635 | `0x44a4` | 1 | 0 |
+| NGX 133888, DOOM The Dark Ages | `0x44a0` | 1 | 1 |
+| NGX 134273 | `0x44f8` | 1 | 1 |
+| Forza Horizon 6 | `0x44b0` | 1 | 1 |
+| NGX 134656 (No Man's Sky) | `0x4520` | 1 | 1, the register store |
 
-Every other write of the opposite value to that flag is then changed to match, so
-the plugin always takes its own software path. Copying the plugin's own value,
-instead of assuming one, is what makes this work across builds. On Vulkan the
-flag has no effect, since flip metering is a Direct3D 12 feature.
+Older builds write 0 for "off", newer ones write 1. Assuming either value would
+force hardware metering on the other half.
 
-The code is found with signatures, not addresses. libhat matches the
-`lea reg, [rip+marker]` that references the string, HDE64 (MinHook's decoder)
-walks the instructions after it to the first byte store, and a second signature
-built from that store finds the opposite writes. `patchprobe` prints the result
-for any `sl.dlss_g.dll` without running a game, which is the first thing to check
-on a new plugin build.
+NGX 133632 to 133635 store only the off value, and only on the old-runtime
+path. Otherwise the flag keeps the constructor's 0, which is not the off value.
+Nothing is rewritten, and `flip_metering_forced` warns with `stores_patched: 0`.
+Whether frame generation works with these builds has not been tested.
+If the marker or the store is not found, nothing is patched and
+`flip_metering_not_patched` is logged.
+
+`patchprobe` prints the result for any `sl.dlss_g.dll`.
+
+Every loaded copy of the plugin is patched, including ones NGX downloaded. Each
+is pinned first (as the proxy pins itself, see [startup](#startup-opening-the-gates-in-time)),
+because Streamline can unload the copy it did not choose while it is being
+read. A plugin that cannot be pinned is skipped and logged as
+`plugin_pin_failed`.
+
+### Reflex and present pacing
+
+Reflex on Vulkan uses the driver extension `VK_NV_low_latency2`. The game turns
+low-latency mode on (`vkSetLatencySleepModeNV`) and is expected to call
+`vkLatencySleepNV` once per frame, which is where the driver makes it wait.
+
+A game that turns low-latency mode on and never calls the sleep is paced by the
+driver inside `vkQueuePresentKHR` instead: the driver waits in a timed loop
+(`SleepEx`, `QueryPerformanceCounter`) before each present. With one present
+per frame that works. With frame generation on, Streamline's presenter thread
+makes a present for every displayed frame, generated ones included, and the
+driver paces each of them as a whole frame. Output drops to half the refresh
+rate, the GPU idles, and the game's render thread waits on the presenter.
+
+No Man's Sky does this. On a 120 Hz display, frame generation took it from
+about 136 fps to 59, with each present held about 16.7 ms in the driver.
+
+**The fix.** Streamline gets both functions from the Vulkan loader's
+resolvers, which are already hooked (#5 in
+[the table](#what-is-changed-and-where)). On Ampere, while frame generation is
+on and nothing has called `vkLatencySleepNV`, `vkSetLatencySleepModeNV` reaches
+the driver with low-latency mode and boost off. The game's other Reflex
+settings and markers are unchanged.
+
+Only calls that reach the driver are changed; the project never calls the
+driver itself. So after frame generation is switched off, low latency stays off until
+Streamline next sets the sleep mode, which it does on every new swapchain. In No
+Man's Sky that came seconds later, when the swapchain was next recreated. The
+cost is some added latency in that window, not lost frames. Each change of
+decision is logged as `reflex_present_pacing` with `low_latency_off`.
+
+What it leaves alone:
+
+- **A game that calls the sleep before frame generation starts**, such as DOOM
+  The Dark Ages. Its pacing already works, and its Reflex is untouched. A game
+  whose first sleep comes after frame generation is on loses low latency until
+  its next swapchain.
+- **Frame generation off.** The game's own setting is passed through.
+- **Other GPUs.**
+
+It follows `PatchFlipMetering`, and needs `VulkanHooks`.
 
 ## Gate 4: kernels
 
+### Background: cubin, PTX and fatbin
+
+A CUDA kernel reaches the driver in one of three forms:
+
+- **Cubin.** Finished machine code (SASS) for one GPU architecture, packaged as
+  an ELF file. It runs only on the same major architecture with the same or a
+  newer minor: an `sm_80` cubin runs on `sm_86`, an `sm_89` one does not.
+- **PTX.** NVIDIA's virtual instruction set: a text assembly language that works
+  as an intermediate representation. The driver contains a JIT compiler that
+  turns PTX into machine code for the installed GPU when the module is loaded.
+  A module starts with a header like:
+
+  ```
+  .version <PTX ISA version>
+  .target sm_89
+  .address_size 64
+  ```
+
+  `.target` declares the oldest architecture the code needs. The JIT compiles
+  the module for that architecture or any newer one, and rejects an instruction
+  the declared target does not have. This forward-only rule is what lets old
+  CUDA programs run on new GPUs.
+- **Fatbin.** A container holding several cubin and PTX builds of the same
+  kernels, each tagged with its architecture, payloads optionally LZ4
+  compressed. The driver picks the entry that suits the GPU. Its layout is
+  declared in `src/kernels/fatbin.cpp`, from CUDA's `fatbinary.h`.
+
+`sm_86` is Ampere (RTX 30), `sm_89` Ada (RTX 40), `sm_120` Blackwell (RTX 50).
+
 ### Why nothing can run
 
-The runtime stores its kernels in two forms and picks among them by the
-architecture it believes it is on. Reading `nvngx_dlssg.dll` 310.3 and 310.6:
+The runtime stores its kernels in both forms and chooses by the architecture it
+believes it is on. In `nvngx_dlssg.dll` 310.3 and 310.6:
 
 | Form | Where | Architectures |
 |---|---|---|
 | Fatbin containers | inside the runtime | PTX `sm_89`, PTX `sm_120`, some cubin `sm_89` |
-| Standalone cubins | beside the containers | 39 `sm_89` and **39 `sm_86`** |
+| Standalone cubins | beside the containers | 39 `sm_89` and 39 `sm_86` |
 
-The runtime has to believe it is on Ada to offer frame generation at all, so it
-always picks the `sm_89` images. None of them run on an RTX 30 (`sm_86`):
-
-- **PTX** is portable intermediate code that the driver compiles on load, but
-  only for the architecture it names **or newer**. `sm_89` PTX cannot be compiled
-  for `sm_86`.
-- **A cubin** is finished machine code. It runs only within its own major
-  version, on the same or a newer minor: an `sm_80` cubin runs on `sm_86`, an
-  `sm_89` one does not.
-
-On Direct3D 12 the driver refuses such an image. On Vulkan it accepts it, and the
-GPU hangs when the kernel runs.
+It has to be told Ada to offer frame generation, so it always picks the `sm_89`
+builds. On Ampere the `sm_89` cubins are the wrong machine code, and the
+`sm_89` and `sm_120` PTX declare targets newer than the GPU, so the driver has
+nothing it can use. On Direct3D 12 the driver refuses such an image. On Vulkan
+it accepts a mismatched cubin and the GPU hangs when the kernel runs.
 
 ### What the engine supplies
 
-Every kernel image the runtime creates passes through `kernels::Decide`, which
-returns one of three answers:
+Every kernel image passes through `kernels::Decide`:
 
 ```mermaid
 flowchart TD
@@ -279,88 +434,147 @@ flowchart TD
     F -- no --> X
 ```
 
-**Native images first.** The 39 standalone `sm_86` cubins are NVIDIA's own Ampere
-builds of the same kernels. The runtime chooses by the architecture it believes it
-is on, and it has been told Ada, so it passes the `sm_89` build instead. The
-engine puts the `sm_86` one back, unchanged.
+**Native cubins first.** The 39 `sm_86` cubins are NVIDIA's Ampere builds of the
+same kernels. The project swaps each `sm_89` cubin for its `sm_86` twin,
+unchanged.
 
-Matching must be exact. A kernel such as `k_conv_fp16_nhwc` has several variants
-that differ only in tile shape, and launching the wrong one hangs the GPU. The
-variants are stored in a different order for each architecture, so position
-means nothing. What identifies a variant is its machine code: NVIDIA's `sm_86` and
-`sm_89` builds of one variant carry **byte-identical code** and differ only in
-metadata, while two variants differ in code. Images are therefore paired by
-kernel name and a hash of the kernel's code section. In both runtimes tested this
-pairs 39 of 39, each to exactly one image.
+The match must be exact: a kernel such as `k_conv_fp16_nhwc` has variants that
+differ only in tile shape, and the wrong one hangs the GPU. Variants are stored
+in a different order per architecture, so position cannot be used. NVIDIA's
+`sm_86` and `sm_89` builds of one variant have byte-identical code and differ
+only in metadata, so images are paired by kernel name and a hash of the code
+section. In both tested runtimes this pairs 39 of 39, each uniquely.
 
-**Retargeted PTX otherwise.** A container's PTX is rebuilt with its `.target`
-directive and the container's architecture field set to `sm_86`, and the driver
-compiles it on load. Nothing else in the PTX changes, and nothing needs to: the
-kernels use `mma.sync.m16n8k16` and `ldmatrix`, both native to Ampere, no FP8 or
-newer instructions, and at most 13.8 KB of static shared memory. `tools/ptxprobe`
-checks this against the installed driver; all 72 PTX modules of a 310.3 runtime
-compile.
+**Retargeted PTX otherwise.** See [below](#how-ptx-is-retargeted).
 
-**Refused when neither applies.** The creation fails, which the runtime handles,
-instead of the driver receiving code it cannot run. If the driver refuses a
-substituted image, that refusal is returned too; the original is never retried,
-because it is by construction unrunnable.
+**Refused otherwise.** The creation call fails, which the runtime handles. If the
+driver refuses a substituted image, that error is returned; the original is
+never retried because it cannot run.
 
-Nothing is shipped or stored. Both kinds of replacement come from the runtime the
-game already has, so a runtime version this project has never seen is handled the
-same way as a known one.
+Nothing is shipped or stored. Replacements come from the game's own runtime, so
+an unseen runtime version is handled the same way.
 
-**Each runtime answers only for itself.** More than one DLSS-G runtime can be
-mapped at once. A driver profile with *DLSS Override* enabled, which the NVIDIA
-app and NVIDIA Profile Inspector both set, makes NGX load a runtime of its own
-from `%ProgramData%\NVIDIA\NGX\models\dlssg\versions\<build>\files`, named
-`<architecture>_<application id>.bin`, and use it instead of the one the game
-ships. So the engine indexes every runtime it sees and answers a kernel from the
-build that created it, never from another one. The native images of two builds
-are not interchangeable even when the kernels look the same: in Crimson Desert,
-answering a 310.9.0 runtime's kernels from a 310.9.1 index had the driver refuse
-all 25 of them with `NVAPI_INVALID_IMAGE`, and Streamline's `sl.dlssg` worker
-then timed out and took the game with it. An unindexed runtime is refused rather
-than answered wrongly, which `kernel_refused` states as `this runtime was not
-indexed`.
+**Each runtime answers for itself.** Several runtimes can be loaded at once: the
+DLSS override (NVIDIA app or Profile Inspector) makes NGX load its own from
+`%ProgramData%\NVIDIA\NGX\models\dlssg\versions\<build>\files`. The project
+indexes every runtime and answers a kernel only from the runtime that created
+it. Builds are not interchangeable: in Crimson Desert, answering 310.9.0 kernels
+from a 310.9.1 index made the driver refuse all 25 with `NVAPI_INVALID_IMAGE`;
+Streamline's `sl.dlssg` worker then timed out and took the game down. Kernels
+from an unindexed runtime are refused with `this runtime was not indexed`.
 
-A runtime is pinned as soon as it is found, before anything reads it. The index
-points into the mapped image and the gate scan reads the code section directly,
-while NGX unloads a runtime it has replaced; without the pin, either read can
-land on an image that is no longer there. A runtime that cannot be pinned is not
-indexed at all.
+A runtime is pinned as soon as it is found, before it is read, because NGX
+unloads runtimes it replaces while the index still points into them. A runtime
+that cannot be pinned is not indexed.
 
-### Two routes to the driver
+A cubin with no native twin is retargeted from the container it came from,
+found by a hash of the whole cubin. If the same image appears in two containers,
+it is not answered at all; `provider_index_built` counts these as
+`ambiguous_images`. No checked runtime has any, so report a non-zero count.
+`patchprobe` shows it without a game.
 
-| API | Entry point | How it is reached |
+### How PTX is retargeted
+
+`kernels::Retarget` (`src/kernels/fatbin.cpp`) builds a new container in memory:
+
+1. Parse the runtime's container and list its entries.
+2. If any entry already runs on this GPU, change nothing.
+3. Pick a PTX entry: the oldest one newer than the GPU (`sm_89`), or with
+   multi-frame on, the newest one with the same kernel interface
+   ([why](#multi-frame-generation)).
+4. Decompress it (LZ4) if needed.
+5. Rewrite every `.target sm_NN` directive to the GPU's architecture. No other
+   byte of the PTX changes.
+6. Emit a container with that one PTX entry, uncompressed, its architecture
+   field set to the GPU's. The original entry header is otherwise copied.
+
+```mermaid
+flowchart LR
+    subgraph original["Runtime's container (read only)"]
+        a1["PTX sm_89, LZ4"]
+        a2["PTX sm_120, LZ4"]
+        a3["cubin sm_89"]
+    end
+    subgraph rebuilt["New container (this project's memory)"]
+        b1["PTX, arch field 86<br/>.target sm_86<br/>uncompressed"]
+    end
+    a1 -- "decompress,<br/>rewrite .target" --> b1
+    b1 --> jit["Driver JIT:<br/>compiles for sm_86"]
+```
+
+The original container is never written to; the new one lives only for the call
+that hands it to the driver.
+
+**Why this works.** `.target sm_89` does not mean the code uses anything
+specific to Ada. It is the target NVIDIA compiled for. Lowering it is correct
+exactly when every instruction and resource the kernels use exists on Ampere.
+For these kernels that holds: they use `mma.sync.m16n8k16` and `ldmatrix`, both
+available since `sm_80`, no FP8 (Ada's main addition), and at most 13.8 KB of
+static shared memory. `tools/ptxprobe` compiles every module against the
+installed driver without a game; all 72 PTX modules of 310.3 compile.
+
+**If it does not hold.** A future kernel using an Ada-only instruction fails to
+compile when the module is created, and the driver's error is returned to the
+runtime (with multi-frame on, after one retry from the Ada PTX, logged as
+`kernel_fallback`). Nothing incompatible ever executes on the GPU.
+
+### Where the image is swapped
+
+The runtime creates kernels through one of three entry points:
+
+| API | Entry point | Interception |
 |---|---|---|
-| Direct3D 12 | `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Inline hook on the function |
-| Direct3D 12, from 310.7 | `NvAPI_D3D12_CreateCuModule` | Inline hook on the function |
-| Vulkan | `vkCreateCuModuleNVX` (`VK_NVX_binary_import`) | Wrapper returned by `vkGetDeviceProcAddr` |
+| Direct3D 12 | `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Inline hook |
+| Direct3D 12, from 310.7 | `NvAPI_D3D12_CreateCuModule` | Inline hook |
+| Vulkan | `vkCreateCuModuleNVX` (`VK_NVX_binary_import`) | Wrapper returned by the loader's `vkGet*ProcAddr` |
 
-The NVAPI parameter block is versioned and not public. The engine finds the image
-inside it by searching for a pointer to a fatbin container and a field holding the
-length that container states for itself; both have to agree. The first calls the
-runtime makes are probes that carry no container, so the search is retried until
-one does:
+On the first route, one call looks like this:
+
+```mermaid
+sequenceDiagram
+    participant R as nvngx_dlssg
+    participant H as Hook
+    participant D as Decide / Retarget
+    participant N as Real NVAPI function
+
+    R->>H: CreateCubinComputeShaderExV2(params: sm_89 image)
+    H->>H: find the image pointer and length in params
+    H->>D: image, calling runtime
+    D-->>H: sm_86 cubin, or retargeted container
+    H->>N: same params, pointing at the replacement
+    Note over N: the driver compiles (PTX) or loads (cubin)
+    N-->>H: status and shader handle
+    H->>H: restore the original pointer and length
+    H-->>R: status and shader handle
+```
+
+`NvAPI_D3D12_CreateCuModule` takes the image as pointer and length arguments,
+and `vkCreateCuModuleNVX` in a `VkCuModuleCreateInfoNVX`; the hook passes the
+replacement in their place (Vulkan gets a copy of the create info).
+
+The NVAPI parameter block is versioned and undocumented. The project finds the
+image in it by looking for a pointer to a fatbin container next to a field
+holding that container's stated length; both must agree. The runtime's first
+calls are probes with no container, so the search is retried until one arrives:
 
 ```
 cubin_params_located struct_size=0x50 data_offset=0x18 size_offset=0x20 name_offset=0x38
 ```
 
-The Vulkan extension function is exported by nobody; `vkGetDeviceProcAddr` hands
-it out, so that is where the engine takes it over.
+No module exports `vkCreateCuModuleNVX`; the Vulkan loader hands it out. Both
+`vkGetDeviceProcAddr` and `vkGetInstanceProcAddr` are hooked, since the instance
+resolver also returns device functions. Missing either would let an
+unrunnable image reach the driver.
 
 A cubin's length is read from its ELF header and includes the program headers,
-which follow the section table. Stopping at the section table hands the driver a
-truncated module.
+which come after the section table. Stopping at the section table truncates the
+module.
 
 ## Multi-frame generation
 
-The runtime decides how many frames it may generate by comparing the
-architecture it was told against Blackwell's id, 0x1B0. It does so where it
-publishes `DLSSG.MultiFrameCountMax` and again where it validates the count a
-game asks for:
+The runtime compares the architecture it was told against Blackwell's id,
+`0x1B0`, to decide how many frames it may generate. It does so where it
+publishes `DLSSG.MultiFrameCountMax` and where it validates the requested count:
 
 ```
 cmp  esi, 0x1B0        ; 310.6
@@ -369,157 +583,142 @@ cmovl r8d, ebx         ; ebx = 1: below Blackwell, one frame
 lea  rdx, "DLSSG.MultiFrameCountMax"
 ```
 
-`MultiFrame=1` rewrites these comparisons to Ada's id, the architecture the
-runtime has been told, as it is loaded and before any of its code runs. The
-plugin's startup line then reports `NGX feature supports 3` (310.3), or 5 from
-310.6 onwards, and a game that supports multi-frame generation offers the
-multipliers its own plugin allows: 4x with a plugin capped at 3 generated
-frames, 6x with one that allows 5, which Crimson Desert reaches. RTX40MFG-Unlock and
-mfg-unlock make the same change on RTX 40 cards.
+The runtime has been told Ada (`0x190`), which is below `0x1B0`, so it allows
+one generated frame. `MultiFrame=1` rewrites the 32-bit immediate in each of
+these comparisons from `0x1B0` to `0x190`, as the runtime loads and before its
+code runs, so the reported Ada passes the test. The plugin then reports `NGX feature supports 3` (310.3),
+or 5 from 310.6, and the game offers what its plugin allows: 4x with a plugin
+capped at 3 frames, 6x with one that allows 5. RTX40MFG-Unlock and mfg-unlock
+make the same change on RTX 40.
 
-**Which comparisons are gates.** Not every comparison against that id is one,
-and the shape of a gate is not stable: 310.6 compiles it to `cmovl` where 310.7
-uses `jl`, so a byte pattern finds one site and misses the other. What does hold
-is the meaning. A gate gives the feature to every architecture at or above an
-id, so the instruction that reads it is an ordering test: `jl`, `jb`, `setae`,
-`cmovl`. A comparison read for equality is asking whether the GPU is one exact
-architecture, and moving the id would change that question rather than answer it
-differently, so it is refused. The reader is always the instruction directly
-after the comparison, where no other instruction can have changed the flags.
+**Which comparisons are gates.** The instruction shape varies (310.6 uses
+`cmovl`, 310.7 uses `jl`), so a byte pattern is not enough. A gate grants the
+feature at or above an id, so the instruction reading its flags is an ordering
+test (`jl`, `jb`, `setae`, `cmovl`). A comparison read for equality asks for one
+exact architecture and is left alone. Only the instruction directly after the
+comparison is considered, so nothing else can have changed the flags.
 
-Two further rules keep an unknown build safe. A comparison whose result is
-published as some other `DLSSG.` parameter belongs to another capability and is
-left alone, logged as `multi_frame_gate_left` naming the parameter, which is how
-`DLSSG.ReflexWarp.Available` survives in 310.3. And if
-a build yields more than four comparisons, or none read as an ordering, nothing
-is rewritten and `multi_frame_gates_not_found` says so. Runtimes from 310.7 put
-a driver-profile clamp between the comparison and the publication, which is why
-the parameter name is no longer what identifies a gate.
+Two more rules for unknown builds:
 
-This rule is mfg-unlock's, from its analysis of 310.6 through 310.8.
+- A comparison whose result is published as another `DLSSG.` parameter is left
+  alone and logged as `multi_frame_gate_left`. This keeps
+  `DLSSG.ReflexWarp.Available` off in 310.3.
+- If a build has more than four comparisons, or none read as an ordering,
+  nothing is changed and `multi_frame_gates_not_found` is logged.
 
-The same id gates other Blackwell capabilities, so not every comparison is
-rewritten. A comparison whose result is published as a `DLSSG.` parameter other
-than `DLSSG.MultiFrameCountMax` is left alone; in 310.3 that keeps
-`DLSSG.ReflexWarp.Available` off. `patchprobe` shows the classification for any
-runtime. Nothing is rewritten unless the `MultiFrameCountMax` comparison itself
-is found.
+From 310.7 a driver-profile clamp sits between the comparison and the
+publication, so the parameter name alone no longer identifies a gate. This rule
+comes from mfg-unlock's analysis of 310.6 through 310.8. `patchprobe` shows the
+classification for any runtime.
 
-A game that only switches frame generation on and off never asks for more than
-one generated frame, whatever the runtime allows. `ForceMultiplier` replaces the
-count in `slDLSSGSetOptions` for those; Far Far West runs at 4x that way.
+The gates are changed only after NVAPI reports an Ampere GPU. On Ada the
+decision is NVIDIA's, and changing it would enable paths whose kernels Ada does
+not have. A runtime that loads before the GPU is known is patched on the next
+module scan, logged as `multi_frame_deferred`.
 
-The kernels need a matching change. The Ada build of the motion-vector kernel
-places every generated frame at the midpoint, a constant 0.5 used 104 times; the
-Blackwell build reads the frame's position from its parameters. At 3x and above
-the Ada build would stack the generated frames on top of each other. With
-`MultiFrame=1`, containers are therefore retargeted from their newest PTX
-(`sm_120`), provided its entry points, parameters, launch bounds and shared
-memory are identical to the Ada build's, so the runtime's launch means the same
-to it. In 310.3 and 310.6 all 31 kernels that ship both builds match, and all
-compile for `sm_86` (`ptxprobe <runtime> 0 newest`). If the driver rejects one,
-it is rebuilt from the Ada PTX and tried once more (`kernel_fallback` in the
-log), so a future runtime whose Blackwell PTX does not fit costs 3x and above,
-not frame generation.
+A game whose menu has only on and off always asks for one generated frame.
+`ForceMultiplier` replaces the count in `slDLSSGSetOptions`; Far Far West runs
+at 4x this way.
+
+The kernels need a matching change. The Ada motion-vector kernel places every
+generated frame at the midpoint (a constant 0.5, used 104 times); the Blackwell
+build reads the position from its parameters. At 3x and above the Ada build
+would stack the frames on top of each other. So with `MultiFrame=1`, containers
+are retargeted from their newest PTX (`sm_120`) when its entry points,
+parameters, launch bounds and shared memory match the Ada build's. In 310.3 and
+310.6 all 31 such kernels match and compile for `sm_86`
+(`ptxprobe <runtime> 0 newest`). If the driver rejects one, it is rebuilt from
+the Ada PTX and retried once (`kernel_fallback`), so a mismatch costs 3x and
+above, not frame generation.
 
 ## Scope and safety
 
-**Ampere (RTX 30) only.** The engine acts only after NVAPI reports an Ampere GPU.
-On any other GPU its hooks pass every call through unchanged.
+**Ampere only.** Nothing changes until NVAPI reports an Ampere GPU; on any other
+GPU the hooks pass calls through.
 
-- **RTX 40 and 50** run DLSS-G natively. Every image they are handed is already
-  runnable, so nothing would change, and the plugin patches are not applied.
-- **RTX 20 (Turing) is not supported yet.** The kernels use `mma.m16n8k16`, which
-  PTX requires `sm_80` for, and the runtime ships no `sm_75` cubins. Supplying
-  Turing kernels needs the PTX rewritten to Turing's smaller matrix instructions.
-  Until that exists, Turing cards are left untouched rather than offered a
-  feature that cannot run.
+- **RTX 40 and 50** run DLSS-G natively. Their kernels already run, and the
+  plugin patches are not applied.
+- **RTX 20 (Turing) is not supported.** The kernels use `mma.m16n8k16`, which
+  requires `sm_80`, and the runtime has no `sm_75` cubins. Supporting Turing
+  would mean rewriting the PTX to use its smaller matrix instructions.
 
 **Fails closed.** A patch that cannot find its exact pattern is skipped and
-logged. A hook that cannot be installed is reported with MinHook's status and not
-retried in a loop. A kernel image that cannot be made runnable is refused.
+logged. A hook that fails is reported with MinHook's status and not retried in a
+loop. A kernel that cannot be made runnable is refused.
 
-**Quits cleanly.** When the process exits, Windows has already stopped every other
-thread, possibly while one held a lock the engine would take. The engine does
-nothing on that path.
+**No work at process exit.** By then Windows has stopped the other threads,
+possibly while one held a lock the project would need, so nothing runs on that
+path.
 
 ## Diagnosing a problem
 
-Logs are written to `opendlssg\logs\` beside the proxy DLL, one JSON object per
-line, one file per process, newest ten kept. They are meant to be attached to a
-bug report, so every path is logged through `log::Field::Path`, which writes the
-user's profile directory as `%USERPROFILE%` rather than carrying an account name
-into a public issue.
+Logs go to `opendlssg\logs\` beside the proxy DLL: one JSON object per line, one
+file per process, newest ten kept. Paths are logged through `log::Field::Path`,
+which writes the user profile directory as `%USERPROFILE%` so logs can be posted
+publicly.
 
-`[Logging] Level` selects how much is kept: 1 errors and warnings, 2 decisions
-and capabilities as well, 3 everything, including a line per call a game makes.
-Level 1 is the default and the right level for a report, because the lines that
-identify a run are written at every level: `attach`, `configuration`, `driver`,
-`gpu_architecture`, `arch_spoof_applied`, `provider_found` and
-`kernels_summary`. A step that merely confirms health, such as `proxy_bound`,
-is written at level 2; its failing form is an error or a warning, so level 1
-still shows anything that went wrong.
+`[Logging] Level`: 1 errors and warnings, 2 adds decisions, 3 adds every call.
+The default, 1, is right for reports: the lines that identify a run (`attach`,
+`configuration`, `driver`, `gpu_architecture`, `arch_spoof_applied`,
+`provider_found`, `kernels_summary`) are written at every level, and every
+healthy-step line has an error or warning form.
 
-An **error** means the engine failed at something it set out to do, and frame
-generation is worse or absent for it. A **warning** means it carried on, and
-covers every deliberate refusal: an unknown runtime version, a plugin whose
-pacing patch found nothing to change, a multiplier the runtime would not take.
-Warnings are expected in healthy runs on newer plugins and are not failures.
+- **Error:** the project failed at something it tried to do; frame generation
+  is worse or absent.
+- **Warning:** it carried on. This includes every deliberate refusal: an
+  unknown runtime version, a pacing patch that found nothing, a multiplier the
+  runtime rejected. Warnings are normal on newer plugins.
 
 | Question | Look for |
 |---|---|
-| Did the engine load? | `attach`, `configuration`, `proxy_bound` with `resolved` equal to `total` |
+| Did the DLL load? | `attach`, `configuration`, `proxy_bound` with `resolved` equal to `total` |
 | Were settings ignored? | `config_value_rejected` |
-| Is this GPU enabled? | `gpu_architecture` with `supported: true` |
-| Did the spoof land in time? | `arch_spoof_applied`, then Streamline's `adapter mask 0x1` |
+| Is this GPU supported? | `gpu_architecture` with `supported: true` |
+| Was the spoof in time? | `arch_spoof_applied`, then `adapter mask 0x1` in `sl.log` |
 | Is frame generation on? | `dlssg_set_options` with `mode: on`, `dlssg_state` with `presented: 2` |
-| Which runtime is in play? | The `caller` of `kernel_substituted`. `provider_found` is written once per runtime mapped, and more than one is normal |
-| Were kernels supplied? | `kernel_substituted` with `method: native` or `retarget` |
-| Were kernels supplied at all? | `kernels_summary`, written once the count settles |
+| Which runtime is generating? | The `caller` of `kernel_substituted` |
+| Were kernels supplied? | `kernel_substituted` with `method: native` or `retarget`; totals in `kernels_summary` |
 | Is the OS in the way? | `hardware_scheduling` with `enabled: false` |
-| Which driver was this? | `driver`, or `driver_version_unavailable` when NVAPI would not answer |
-| Why is a hook missing? | `hook_export_missing`, or `nvapi_interface_absent` when the installed driver does not publish that entry point, which an older driver legitimately may not |
+| Which driver? | `driver`, or `driver_version_unavailable` |
+| Why is a hook missing? | `hook_export_missing`, or `nvapi_interface_absent` if the driver lacks that entry point |
 | Did anything fail? | `hook_failed`, `kernel_refused`, `kernel_driver_rejected`, `runtime_redirect_missing` |
 
-**More than one runtime.** A process can map several DLSS-G runtimes: the one the
-game ships, one NGX downloaded for a driver profile with the DLSS override
-enabled, and the driver's own fallback copy. Each gets its own `provider_found`,
-`multi_frame_unlocked` and `provider_index_built`, named by path. The one
-generating frames is the one named as the `caller` of `kernel_substituted`; the
-others are read and put aside, so a `multi_frame_gates_not_found` against one of
-them is not a failure of the run.
+**Several runtimes.** A process can load the game's runtime, one from the DLSS
+override, and the driver's fallback copy. Each gets its own `provider_found`,
+`multi_frame_unlocked` and `provider_index_built`. Only the `caller` of
+`kernel_substituted` generates frames, so `multi_frame_gates_not_found` on
+another one is not a failure.
 
-Two refusals say the opposite, and they are different problems.
-`this runtime was not indexed` means kernels arrived from a runtime the loader
-never found, and `caller` names it. `the calling module could not be identified`
-means the return address belonged to no module at all, which happens when
-another tool has hooked the same entry point and calls through a trampoline of
-its own. That one is only ever refused while several runtimes are indexed: with
-one there is nothing to confuse it with, so it is answered from that one, which
-is what a single-runtime process did before any of this existed. No tool tested
-against so far interposes on these entry points, so this is a guard rather than
-a path anything is known to take.
+**Two kinds of refusal.**
 
-`provider_pin_failed` means a runtime was found and then could not be kept
-mapped, so it was left alone rather than indexed from an image that may be
-unmapped underneath it.
+- `this runtime was not indexed`: kernels came from a runtime the loader never
+  found; `caller` names it.
+- `the calling module could not be identified`: the return address is in no
+  module, which happens when another tool hooks the same entry point and calls
+  through its own trampoline. This is refused only when several runtimes are
+  indexed; with one, that runtime is used. No tested tool does this.
 
-**Streamline's reasoning.** Streamline states why it accepts or refuses a feature
-in its own log and nowhere else. A production interposer ignores its JSON
-override, so `[Debug] StreamlineDiagnostics=1` sets `SL_LOG_LEVEL` and
-`SL_LOG_PATH` before Streamline starts; its log appears as `sl.log` next to ours.
+`provider_pin_failed`: a runtime could not be pinned, so it was not indexed.
 
-**Black screen or freeze.** This is usually a GPU hang, not a stalled wait.
-Windows records each one in the System event log: provider `nvlddmkm`, message
-`Restarting TDR occurred`. That entry is what distinguishes the two.
+**Streamline's log.** Streamline explains its decisions only in its own log. A
+production interposer ignores its JSON config, so `StreamlineDiagnostics=1` sets
+`SL_LOG_LEVEL` and `SL_LOG_PATH` before Streamline starts, producing `sl.log`.
+Streamline reads them early in `slInit`.
 
-**Vulkan hook unavailable.** `vulkan_hooks_unavailable` means the Vulkan loader
-was loaded and its `vkGetDeviceProcAddr` could not be hooked. Many Direct3D 12
-games load the loader only to probe for Vulkan and unload it again; the engine
-holds a reference while it hooks, and a loader that is already gone is simply
-tried again later, so that probe is not an error. Direct3D 12 games are
-unaffected either way. In a Vulkan game, frame generation will have no kernels
-it can run.
+If the game's executable does not import the proxy, `sl.common.dll` loads it
+inside `slInit`. That is too late, and no `sl.log` appears. No Man's Sky is one.
+
+In that case, set them as user environment variables (`setx SL_LOG_LEVEL 2`,
+`setx SL_LOG_PATH <folder>`), start the game, and remove them afterwards.
+
+**Black screen or freeze.** Usually a GPU hang, which Windows logs in the System
+event log as `nvlddmkm`, `Restarting TDR occurred`.
+
+**`vulkan_hooks_unavailable`.** The Vulkan loader was present but a resolver
+could not be hooked; `device_resolver` and `instance_resolver` say which. Many
+Direct3D 12 games load and unload the Vulkan loader just to probe it; a loader
+that is already gone is retried later and is not an error. Direct3D 12 games are
+unaffected. In a Vulkan game, frame generation will have no runnable kernels.
 
 ## Source map
 
@@ -530,9 +729,9 @@ it can run.
 | `src/app` | Settings, startup, module discovery (`loader.cpp`) |
 | `src/core` | Logging, INI, UTF-8, PE helpers, x86 decoding, the hook installer |
 | `src/spoof` | NVAPI: the architecture answer, the priority stub, the D3D12 kernel route |
-| `src/streamline` | Interposer diagnostics, plugin patches |
-| `src/kernels` | Kernel decisions, fatbin and cubin handling, native cubin index, Vulkan route |
-| `src/provider` | Identifies the runtime and its version; the multi-frame gates |
+| `src/streamline` | Interposer diagnostics, frame-generation state, plugin patches |
+| `src/kernels` | Kernel decisions, fatbin and cubin handling, native cubin index, Vulkan route, Reflex pacing fix |
+| `src/provider` | Runtime identification and version; the multi-frame gates |
 | `tests` | Unit tests for the pure logic |
-| `tools/ptxprobe` | Checks a runtime's kernels against the installed driver, without a game |
-| `tools/patchprobe` | Reports what the patches would change in an `sl.dlss_g.dll` or `nvngx_dlssg.dll`, without a game |
+| `tools/ptxprobe` | Compiles a runtime's kernels against the installed driver, without a game |
+| `tools/patchprobe` | Shows the patch sites in `sl.dlss_g.dll` or `nvngx_dlssg.dll`, and a runtime's kernel index, without a game |

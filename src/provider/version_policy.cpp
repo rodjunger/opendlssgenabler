@@ -1,5 +1,7 @@
 #include "provider/version_policy.h"
 
+#include "core/paths.h"
+
 #include <winver.h>
 
 #include <array>
@@ -9,17 +11,18 @@
 namespace odg::provider {
 namespace {
 
-// Runtimes verified in a game: 310.2.1 in Halo Campaign Evolved, 310.3 in
-// PRAGMATA and Jurassic World Evolution 3, 310.5.2 in Corsair Cove, all
-// Direct3D 12, and 310.6 in DOOM The Dark Ages (Vulkan). Matched on
-// major.minor.build. 310.9.1 was verified through [Runtime] Mode=Bundled rather
-// than as a runtime a game ships, and 310.9.0 as the runtime NGX loads for a
-// driver profile with the DLSS override enabled.
+// Runtimes verified in a game, matched on major.minor.build. docs/TESTING.md
+// lists the games and results, and is where a new entry is recorded first.
 struct Tested {
     uint16_t major, minor, build;
 };
-constexpr std::array<Tested, 6> kTested{
-    {{310, 2, 1}, {310, 3, 0}, {310, 5, 2}, {310, 6, 0}, {310, 9, 0}, {310, 9, 1}}};
+constexpr std::array<Tested, 7> kTested{{{310, 2, 1},
+                                         {310, 3, 0},
+                                         {310, 4, 0},
+                                         {310, 5, 2},
+                                         {310, 6, 0},
+                                         {310, 9, 0},
+                                         {310, 9, 1}}};
 
 // The version-info APIs are resolved from the System32 copy of version.dll at
 // runtime rather than imported. A static import would be a self-reference when
@@ -38,13 +41,7 @@ struct VersionApi {
 const VersionApi& Api() {
     static const VersionApi api = [] {
         VersionApi a;
-        wchar_t system_dir[MAX_PATH];
-        const UINT length = GetSystemDirectoryW(system_dir, MAX_PATH);
-        if (length == 0 || length >= MAX_PATH)
-            return a;
-        std::wstring path(system_dir, length);
-        path += L"\\version.dll";
-        HMODULE module = LoadLibraryW(path.c_str());
+        HMODULE module = paths::LoadSystemLibrary(L"version.dll");
         if (!module)
             return a;
         a.get_size = reinterpret_cast<PfnGetSize>(GetProcAddress(module, "GetFileVersionInfoSizeW"));

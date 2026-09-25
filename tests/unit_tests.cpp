@@ -1,6 +1,7 @@
 // Unit tests for the parts of the engine that are pure logic: configuration
 // parsing, the fatbin container, cubins, the CUDA compatibility rule, x86
-// decoding and text conversion. They need no GPU and no game.
+// decoding, the patch-site analysis of NVIDIA's binaries on synthetic code, and
+// text conversion. They need no GPU and no game.
 //
 // Build with -DODG_BUILD_TESTS=ON and run odg_unit_tests.exe on Windows.
 
@@ -16,6 +17,8 @@
 #include "kernels/fatbin.h"
 #include "kernels/provider_index.h"
 #include "kernels/substitute.h"
+#include "provider/multi_frame.h"
+#include "streamline/plugin_patch.h"
 
 #include <lz4.h>
 
@@ -23,7 +26,10 @@
 
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <initializer_list>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -229,15 +235,41 @@ void TestPtxSource() {
     Activate(kNvApiAmpere, 2);
     Request request;
     request.route = "test";
-    CHECK(Decide(both.data(), both.size(), request, out) == Decision::Substituted);
-    CHECK(Describe(out.data(), out.size(), images));
-    CHECK(Fallback(both.data(), both.size(), 1, request, out));
-    CHECK(Describe(out.data(), out.size(), images) && images.size() == 1);
-    const std::string closest_text(reinterpret_cast<const char*>(out.data()) +
-                                       images[0].payload_offset,
-                                   images[0].payload_size);
+    Substitution substitution;
+    CHECK(Decide(both.data(), both.size(), request, substitution) == Decision::Substituted);
+    CHECK(substitution.source_arch == 120);
+    CHECK(Describe(substitution.image.data(), substitution.image.size(), images));
+    CHECK(Fallback(both.data(), both.size(), 1, request, substitution));
+    CHECK(substitution.source_arch == 89);
+    CHECK(Describe(substitution.image.data(), substitution.image.size(), images) &&
+          images.size() == 1);
+    const std::string closest_text(
+        reinterpret_cast<const char*>(substitution.image.data()) + images[0].payload_offset,
+        images[0].payload_size);
     CHECK(closest_text.find("0f3F000000") != std::string::npos);
-    CHECK(!Fallback(both.data(), both.size(), 1, request, out)); // only once
+    CHECK(!Fallback(both.data(), both.size(), 1, request, substitution)); // only once
+
+    // The driver is called through the same path on every route: a refusal of
+    // the newest source is retried once from the closest.
+    Substitution retried;
+    CHECK(Decide(both.data(), both.size(), request, retried) == Decision::Substituted);
+    std::vector<uint32_t> tried;
+    const int status = CreateSubstituted(both.data(), both.size(), request, retried,
+                                         [&](const std::vector<uint8_t>&) {
+                                             tried.push_back(retried.source_arch);
+                                             return tried.size() == 1 ? -1 : 0;
+                                         });
+    CHECK(status == 0 && tried.size() == 2 && tried[0] == 120 && tried[1] == 89);
+
+    // With retargeting switched off, an image this GPU cannot run is refused
+    // rather than handed to the driver, and a runnable one still passes.
+    options.enabled = false;
+    Configure(options);
+    CHECK(Decide(both.data(), both.size(), request, substitution) == Decision::Refused);
+    const std::vector<uint8_t> ampere = MakeContainer(80, PtxFor(80));
+    CHECK(Decide(ampere.data(), ampere.size(), request, substitution) == Decision::Unchanged);
+    options.enabled = true;
+    Configure(options);
 
     // A different parameter block would be launched with the wrong arguments.
     const std::string other = PtxFor(120, "\n.param .u64 k_param_0\n", "ret;");
@@ -278,6 +310,17 @@ void TestRetarget() {
 
     // Truncated input is rejected rather than read past its end.
     CHECK(!Describe(ada.data(), 20, images));
+    // Including when the size given is shorter than the header claims to be.
+    std::vector<uint8_t> long_header = ada;
+    Put<uint16_t>(long_header, 0x06, 0x40);
+    CHECK(!Describe(long_header.data(), 32, images));
+    CHECK(!Retarget(long_header.data(), 32, 86, out, report));
+
+    // A decompressed length no PTX module could have is refused, not allocated.
+    std::vector<uint8_t> inflated = MakeContainer(89, PtxFor(89), true);
+    Put<uint64_t>(inflated, 16 + 0x38, uint64_t{1} << 40);
+    Report refused;
+    CHECK(!Retarget(inflated.data(), inflated.size(), 86, out, refused));
 
     // A compressed image comes out uncompressed, with its flag cleared.
     const std::vector<uint8_t> packed = MakeContainer(89, PtxFor(89), true);
@@ -509,6 +552,152 @@ void TestConditions() {
     CHECK(compare && ConditionTested(*odg::x86::Decode(compare->Next())) == Condition::Ordering);
 }
 
+// Writes `bytes` at `offset`, and a `lea reg, [rip + rel32]` there whose
+// operand is `target`: the three opcode bytes are given, the rel32 computed.
+void PutLea(std::vector<uint8_t>& out, size_t offset, std::initializer_list<uint8_t> opcode,
+            size_t target) {
+    std::copy(opcode.begin(), opcode.end(), out.begin() + static_cast<std::ptrdiff_t>(offset));
+    const size_t next = offset + opcode.size() + sizeof(int32_t);
+    Put<int32_t>(out, offset + opcode.size(), static_cast<int32_t>(target - next));
+}
+
+void PutBytes(std::vector<uint8_t>& out, size_t offset, std::initializer_list<uint8_t> bytes) {
+    std::copy(bytes.begin(), bytes.end(), out.begin() + static_cast<std::ptrdiff_t>(offset));
+}
+
+void PutText(std::vector<uint8_t>& out, size_t offset, const char* text) {
+    std::memcpy(out.data() + offset, text, std::strlen(text) + 1);
+}
+
+std::span<const std::byte> Bytes(const std::vector<uint8_t>& data, size_t size) {
+    return {reinterpret_cast<const std::byte*>(data.data()), size};
+}
+
+// The three shapes a comparison against Blackwell's id takes in the runtime,
+// and which of them is moved.
+void TestMultiFrameGates() {
+    constexpr size_t kCode = 64, kImage = 160;
+    constexpr size_t kMultiFrameName = 64, kReflexName = 100;
+    std::vector<uint8_t> image(kImage, 0x90);
+    PutBytes(image, 0, {0x3D, 0xB0, 0x01, 0x00, 0x00});       // cmp eax, 0x1B0
+    PutBytes(image, 5, {0x0F, 0x93, 0xC0});                   // setae al
+    PutLea(image, 8, {0x48, 0x8D, 0x15}, kMultiFrameName);    // lea rdx, "DLSSG.MultiFrameCountMax"
+    PutBytes(image, 15, {0x81, 0xFE, 0xB0, 0x01, 0x00, 0x00}); // cmp esi, 0x1B0
+    PutBytes(image, 21, {0x0F, 0x94, 0xC0});                  // sete al
+    PutBytes(image, 24, {0x3D, 0xB0, 0x01, 0x00, 0x00});      // cmp eax, 0x1B0
+    PutBytes(image, 29, {0x7C, 0x05});                        // jl
+    PutLea(image, 31, {0x48, 0x8D, 0x0D}, kReflexName);       // lea rcx, "DLSSG.ReflexWarp.Available"
+    PutText(image, kMultiFrameName, "DLSSG.MultiFrameCountMax");
+    PutText(image, kReflexName, "DLSSG.ReflexWarp.Available");
+
+    const auto gates = odg::provider::FindMultiFrameGates(Bytes(image, kImage), Bytes(image, kCode));
+    CHECK(gates.size() == 3);
+    // Found per encoding, so looked up by where each comparison is.
+    const auto at = [&](size_t immediate) -> const odg::provider::Gate* {
+        for (const auto& gate : gates) {
+            if (gate.immediate == reinterpret_cast<const std::byte*>(image.data()) + immediate)
+                return &gate;
+        }
+        return nullptr;
+    };
+    const auto* floor = at(1);
+    const auto* equality = at(17);
+    const auto* other = at(25);
+    CHECK(floor && equality && other);
+    if (!floor || !equality || !other)
+        return;
+    // The floor the multi-frame count is published from is moved.
+    CHECK(floor->unlock && floor->publishes == "DLSSG.MultiFrameCountMax");
+    // A comparison read for equality asks something else, and is left.
+    CHECK(!equality->unlock && equality->condition == odg::x86::Condition::Equality);
+    // An ordering test that publishes another capability is left too.
+    CHECK(!other->unlock && other->condition == odg::x86::Condition::Ordering);
+    CHECK(other->publishes == "DLSSG.ReflexWarp.Available");
+}
+
+// Flip metering and the frame clamp as the plugin compiles them: the fallback
+// store after the marker's reference gives the flag and its off value, and
+// every store of the other value to that flag is found.
+void TestPluginAnalysis() {
+    constexpr size_t kCode = 128, kImage = 192, kMarker = 128;
+    std::vector<uint8_t> image(kImage, 0x90);
+    PutLea(image, 0, {0x48, 0x8D, 0x0D}, kMarker);                     // lea rcx, marker
+    PutBytes(image, 7, {0xE8, 0x00, 0x00, 0x00, 0x00});                // call (the log)
+    PutBytes(image, 12, {0xC6, 0x83, 0xBC, 0x38, 0x00, 0x00, 0x00});   // mov [rbx+38BCh], 0
+    PutBytes(image, 20, {0xC6, 0x86, 0xBC, 0x38, 0x00, 0x00, 0x01});   // mov [rsi+38BCh], 1
+    PutBytes(image, 27, {0xC6, 0x83, 0xBC, 0x38, 0x00, 0x00, 0x01});   // mov [rbx+38BCh], 1
+    PutBytes(image, 34, {0xC6, 0x83, 0xBD, 0x38, 0x00, 0x00, 0x01});   // another field
+    PutBytes(image, 41, {0xBA, 0x03, 0x00, 0x00, 0x00, 0x3B, 0xCA, 0x0F, 0x42, 0xD1}); // clamp
+    PutText(image, kMarker, "FG1 DLL has been detected");
+
+    const auto analysis =
+        odg::streamline::AnalyzePlugin(Bytes(image, kImage), Bytes(image, kCode));
+    const auto* base = reinterpret_cast<const std::byte*>(image.data());
+    CHECK(analysis.flip_metering.has_value());
+    if (const auto& flip = analysis.flip_metering) {
+        CHECK(flip->flag_offset == 0x38BC && flip->off_value == 0);
+        CHECK(flip->rewrites.size() == 2);
+        CHECK(flip->rewrites.size() == 2 && flip->rewrites[0].address == base + 26 &&
+              flip->rewrites[1].address == base + 33);
+        CHECK(std::string(flip->model_version_store) == "absent");
+    }
+    CHECK(analysis.frame_clamp.has_value());
+    if (const auto& clamp = analysis.frame_clamp)
+        CHECK(clamp->limit == 3 && clamp->cmov == base + 48);
+
+    // Newer plugins: off is 1, and after reading DLSSG.ModelVersion the flag is
+    // set to on from a register. That store is re-encoded in place.
+    constexpr size_t kParameter = 160;
+    std::vector<uint8_t> newer(kImage, 0x90);
+    PutLea(newer, 0, {0x48, 0x8D, 0x0D}, kMarker);                     // lea rcx, marker
+    PutBytes(newer, 7, {0xC6, 0x83, 0x20, 0x45, 0x00, 0x00, 0x01});    // mov [rbx+4520h], 1
+    PutLea(newer, 14, {0x48, 0x8D, 0x15}, kParameter);                 // lea rdx, parameter
+    PutBytes(newer, 21, {0x81, 0xFA, 0x00, 0x02, 0x00, 0x00});         // cmp edx, 200h
+    PutBytes(newer, 27, {0x7C, 0x10});                                 // jl
+    PutBytes(newer, 29, {0x40, 0x88, 0xBB, 0x20, 0x45, 0x00, 0x00});   // mov [rbx+4520h], dil
+    PutText(newer, kMarker, "FG1 DLL has been detected");
+    PutText(newer, kParameter, "DLSSG.ModelVersion");
+    const auto registered =
+        odg::streamline::AnalyzePlugin(Bytes(newer, kImage), Bytes(newer, kCode));
+    const auto* newer_base = reinterpret_cast<const std::byte*>(newer.data());
+    CHECK(registered.flip_metering.has_value());
+    if (const auto& flip = registered.flip_metering) {
+        CHECK(flip->flag_offset == 0x4520 && flip->off_value == 1);
+        CHECK(std::string(flip->model_version_store) == "register");
+        const std::vector<std::byte> immediate = {
+            std::byte{0xC6}, std::byte{0x83}, std::byte{0x20}, std::byte{0x45},
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x01}}; // mov [rbx+4520h], 1
+        CHECK(flip->rewrites.size() == 1 && flip->rewrites[0].address == newer_base + 29 &&
+              flip->rewrites[0].bytes == immediate);
+    }
+
+    // A register store that needs no REX prefix is one byte shorter than its
+    // immediate form, so it cannot be replaced in place and is left.
+    PutBytes(newer, 29, {0x88, 0x83, 0x20, 0x45, 0x00, 0x00, 0x90});   // mov [rbx+4520h], al
+    const auto unfit =
+        odg::streamline::AnalyzePlugin(Bytes(newer, kImage), Bytes(newer, kCode));
+    CHECK(unfit.flip_metering && unfit.flip_metering->rewrites.empty() &&
+          std::string(unfit.flip_metering->model_version_store) == "unfit");
+
+    // A constant store there is one of the stores of the on value, and its
+    // immediate is rewritten like the others.
+    PutBytes(newer, 29, {0xC6, 0x83, 0x20, 0x45, 0x00, 0x00, 0x00});   // mov [rbx+4520h], 0
+    const auto constant =
+        odg::streamline::AnalyzePlugin(Bytes(newer, kImage), Bytes(newer, kCode));
+    CHECK(constant.flip_metering &&
+          std::string(constant.flip_metering->model_version_store) == "constant");
+    CHECK(constant.flip_metering && constant.flip_metering->rewrites.size() == 1 &&
+          constant.flip_metering->rewrites[0].address == newer_base + 35);
+
+    // Without the marker nothing is found, and the reason says so.
+    std::vector<uint8_t> unmarked = image;
+    PutText(unmarked, kMarker, "something else entirely");
+    const auto missing =
+        odg::streamline::AnalyzePlugin(Bytes(unmarked, kImage), Bytes(unmarked, kCode));
+    CHECK(!missing.flip_metering && std::string(missing.flip_metering_problem) ==
+                                        "marker string not found");
+}
+
 void TestLogLevels() {
     using odg::log::Level;
     using odg::log::LevelFromSetting;
@@ -550,6 +739,10 @@ void TestPathRedaction() {
     CHECK(elsewhere.token.find("Program Files") != std::string::npos);
     CHECK(elsewhere.token.find("%USERPROFILE%") == std::string::npos);
     CHECK(odg::log::Field::Path("path", nullptr).token == "\"\"");
+    // Another account whose name starts with this one's is not under it.
+    const odg::log::Field sibling =
+        odg::log::Field::Path("path", L"C:\\Users\\somebody2\\x.dll");
+    CHECK(sibling.token.find("%USERPROFILE%") == std::string::npos);
 }
 
 void TestComponentName() {
@@ -641,6 +834,8 @@ int main() {
     TestPathRedaction();
     TestLogLevels();
     TestConditions();
+    TestMultiFrameGates();
+    TestPluginAnalysis();
     TestLogPruning();
     std::printf("%d checks, %d failed\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -51,10 +51,6 @@ constexpr uint16_t kMachineCuda = 190;
 // NVIDIA stores the SM number in the low byte of e_flags: sm_89 reads as 0x59.
 constexpr uint32_t kFlagsSmMask = 0xFF;
 
-std::span<const uint8_t> View(const void* blob, size_t size) {
-    return blob ? std::span(static_cast<const uint8_t*>(blob), size) : std::span<const uint8_t>{};
-}
-
 std::optional<ElfHeader> CubinHeader(std::span<const uint8_t> image) {
     const auto header = bytes::Read<ElfHeader>(image, 0);
     if (!header || std::memcmp(header->ident, kElfMagic, sizeof(kElfMagic)) != 0 ||
@@ -75,12 +71,12 @@ std::optional<size_t> TableEnd(uint64_t offset, uint16_t entry_size, uint16_t co
 } // namespace
 
 uint32_t CubinArch(const void* blob, size_t size) {
-    const auto header = CubinHeader(View(blob, size));
+    const auto header = CubinHeader(bytes::View(blob, size));
     return header ? header->flags & kFlagsSmMask : 0;
 }
 
 size_t CubinSize(const void* blob, size_t available) {
-    const auto header = CubinHeader(View(blob, available));
+    const auto header = CubinHeader(bytes::View(blob, available));
     if (!header)
         return 0;
     // The program headers follow the section table, so the image ends where the
@@ -98,7 +94,7 @@ size_t CubinSize(const void* blob, size_t available) {
 std::vector<CubinSection> CubinSections(const void* blob, size_t available) {
     std::vector<CubinSection> sections;
     const size_t size = CubinSize(blob, available);
-    const auto image = View(blob, size);
+    const auto image = bytes::View(blob, size);
     const auto header = CubinHeader(image);
     if (!header || header->section_header_size < sizeof(SectionHeader) ||
         header->section_names_index >= header->section_header_count)

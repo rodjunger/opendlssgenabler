@@ -19,9 +19,11 @@ std::atomic<uint32_t> g_force_multiplier{0};
 std::atomic<bool> g_installed{false};
 std::atomic<PFun_slGetFeatureFunction*> g_get_feature_function{nullptr};
 std::atomic<PFun_slDLSSGSetOptions*> g_set_options{nullptr};
+std::atomic<bool> g_frame_generation_on{false};
 std::atomic<PFun_slDLSSGGetState*> g_get_state{nullptr};
 std::atomic<uint64_t> g_set_calls{0};
 std::atomic<uint64_t> g_last_request{UINT64_MAX};
+std::atomic<bool> g_newer_options_reported{false};
 
 const char* ModeName(sl::DLSSGMode mode) {
     switch (mode) {
@@ -144,7 +146,7 @@ bool ShouldReport(const sl::DLSSGOptions& options) {
     return changed || (call & (call - 1)) == 0;
 }
 
-sl::Result HookSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options) {
+sl::Result SetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options) {
     PFun_slDLSSGSetOptions* original = g_set_options.load(std::memory_order_acquire);
     if (!original)
         return sl::Result::eErrorNotInitialized;
@@ -162,12 +164,28 @@ sl::Result HookSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
             log::Event(log::Level::Info, "dlssg_set_options",
                        {log::Field::Str("mode", ModeName(options.mode)),
                         log::Field::Uint("num_frames", options.numFramesToGenerate),
+                        log::Field::Hex("flags", static_cast<uint32_t>(options.flags)),
+                        log::Field::Uint("back_buffers", options.numBackBuffers),
                         log::Field::Str("result", ResultName(result)),
                         log::Field::Str("forced", "no")});
             if (result == sl::Result::eOk)
                 LogState(viewport, &options, "after_set");
         }
         return result;
+    }
+
+    // The copy below is this build's struct. A game built against a newer SDK
+    // passes fields it does not have, and Streamline would read them past the
+    // end of the copy, so such a request is passed through as the game made it.
+    static const uint32_t kKnownVersion = sl::DLSSGOptions{}.structVersion;
+    if (options.structVersion > kKnownVersion) {
+        if (!g_newer_options_reported.exchange(true))
+            log::Event(log::Level::Warning, "dlssg_force_skipped",
+                       {log::Field::Uint("struct_version", options.structVersion),
+                        log::Field::Uint("known_version", kKnownVersion),
+                        log::Field::Str("note", "the game's Streamline is newer than this build; "
+                                                "its own multiplier is used")});
+        return original(viewport, options);
     }
 
     sl::DLSSGOptions adjusted = CopyKnownOptions(options);
@@ -194,6 +212,13 @@ sl::Result HookSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
                     log::Field::Str("forced", "yes")});
         LogState(viewport, &adjusted, "after_set");
     }
+    return result;
+}
+
+sl::Result HookSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options) {
+    const sl::Result result = SetOptions(viewport, options);
+    if (result == sl::Result::eOk)
+        g_frame_generation_on.store(options.mode != sl::DLSSGMode::eOff, std::memory_order_release);
     return result;
 }
 
@@ -390,6 +415,10 @@ sl::Result HookInit(const sl::Preferences& preferences, uint64_t sdk_version) {
 }
 
 } // namespace
+
+bool FrameGenerationOn() {
+    return g_frame_generation_on.load(std::memory_order_acquire);
+}
 
 void SetForceMultiplier(uint32_t multiplier) {
     g_force_multiplier.store(multiplier, std::memory_order_release);

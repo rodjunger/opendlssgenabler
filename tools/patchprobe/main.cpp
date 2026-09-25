@@ -1,11 +1,12 @@
 // Reports what the in-memory patches would change in a Streamline DLSS-G plugin
-// (sl.dlss_g.dll) or an NVIDIA DLSS-G runtime (nvngx_dlssg.dll), without
-// changing it. Use it to check a new build before a game runs it.
+// (sl.dlss_g.dll) or an NVIDIA DLSS-G runtime (nvngx_dlssg.dll), and what the
+// kernel index finds in a runtime, without changing either. Use it to check a new build before a game runs it.
 //
 //   patchprobe <dll>...
 //
 // This is a development tool. Each file is mapped but never initialised.
 
+#include "kernels/provider_index.h"
 #include "provider/multi_frame.h"
 #include "streamline/plugin_patch.h"
 
@@ -24,12 +25,14 @@ bool ReportPlugin(HMODULE plugin) {
     const auto analysis = odg::streamline::AnalyzePlugin(plugin);
     bool ok = true;
     if (const auto& flip = analysis.flip_metering) {
-        std::printf("  flip metering: flag +0x%x, off %u, stores to rewrite %zu\n",
+        std::printf("  flip metering: flag +0x%x, off %u, stores to rewrite %zu, "
+                    "model-version store %s\n",
                     static_cast<unsigned>(flip->flag_offset), flip->off_value,
-                    flip->opposite_stores.size());
-        for (const std::byte* store : flip->opposite_stores)
-            std::printf("    immediate at rva 0x%zx\n", Rva(store, plugin));
-        ok = !flip->opposite_stores.empty();
+                    flip->rewrites.size(), flip->model_version_store);
+        for (const auto& rewrite : flip->rewrites)
+            std::printf("    %zu byte(s) at rva 0x%zx\n", rewrite.bytes.size(),
+                        Rva(rewrite.address, plugin));
+        ok = !flip->rewrites.empty();
     } else {
         std::printf("  flip metering: not found (%s)\n", analysis.flip_metering_problem);
         ok = false;
@@ -43,6 +46,11 @@ bool ReportPlugin(HMODULE plugin) {
 }
 
 void ReportRuntime(HMODULE runtime) {
+    if (const auto index = odg::kernels::BuildProviderIndex(runtime))
+        std::printf("  kernel index: %zu containers, %zu ambiguous images, %zu cubins, "
+                    "%zu kernels with a cubin for more than one architecture\n",
+                    index->containers, index->ambiguous_images, index->cubins,
+                    index->kernels_with_alternatives);
     const auto gates = odg::provider::FindMultiFrameGates(runtime);
     std::printf("  comparisons against Blackwell: %zu\n", gates.size());
     for (const auto& gate : gates)
@@ -65,7 +73,8 @@ int Probe(const char* path) {
         ReportRuntime(module);
     else if (!ReportPlugin(module))
         status = 1;
-    FreeLibrary(module);
+    // Kept mapped: the kernel index is keyed by module, and a later file
+    // mapped at the same address would otherwise be taken as indexed already.
     return status;
 }
 
