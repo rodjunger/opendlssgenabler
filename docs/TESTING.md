@@ -63,7 +63,7 @@ run`.
 | No 3x or 4x option | `multi_frame_gates_not_found`, or the game's plugin caps it (`SL Plugin supports N` in `sl.log`) |
 | Option present, no extra frames | `kernel_substituted` missing or `kernel_refused` present |
 | Frame generation on, nothing generated, no refusal | `cu_function_missing` names a kernel missing from the substituted module |
-| Frame generation lowers the frame rate, Vulkan game | Check `reflex_present_pacing` with `low_latency_off: true` is logged. If not, and `PatchFlipMetering=1`, the driver may be pacing every present; see [ARCHITECTURE.md](ARCHITECTURE.md#reflex-and-present-pacing) |
+| Frame generation lowers the frame rate, Vulkan game | Look for `reflex_present_pacing` with `low_latency_off: true`. If it is missing, check `PatchFlipMetering=1` and `VulkanHooks=1`. See [ARCHITECTURE.md](ARCHITECTURE.md#reflex-and-present-pacing) |
 | `StreamlineDiagnostics=1` but no `sl.log` | The proxy loaded after Streamline started; set the variables yourself, see [ARCHITECTURE.md](ARCHITECTURE.md#diagnosing-a-problem) |
 | `NvAPI_D3D12_CreateCuModule failed` in `sl.log`, then a crash | The fatbin route failed; look for `cu_module_intercepted` |
 | Vulkan game, no extra frames | `vulkan_hooks_unavailable` |

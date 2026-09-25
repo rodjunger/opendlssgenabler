@@ -114,7 +114,7 @@ int32_t __stdcall HookedCreateCuFunction(void* device, const CuFunctionCreateInf
 // is passed through; Streamline sends it again on every new swapchain, which
 // is how the game's setting comes back after frame generation is switched off.
 
-// VkLatencySleepModeInfoNV, from the Vulkan specification.
+// VkLatencySleepModeInfoNV, from VK_NV_low_latency2 in the Vulkan specification.
 struct LatencySleepModeInfo {
     uint32_t type;
     const void* next;
@@ -140,25 +140,24 @@ int32_t __stdcall HookedLatencySleep(void* device, uint64_t swapchain, const voi
     return original(device, swapchain, info);
 }
 
-bool TurnsLowLatencyOff(const LatencySleepModeInfo& requested) {
-    return requested.low_latency_mode && Active() &&
-           g_present_pacing_fix.load(std::memory_order_acquire) &&
-           !g_latency_sleep_seen.load(std::memory_order_acquire) &&
-           streamline::FrameGenerationOn();
-}
-
 int32_t __stdcall HookedSetLatencySleepMode(void* device, uint64_t swapchain,
                                             const LatencySleepModeInfo* info) {
     const PfnSetLatencySleepMode original = g_set_latency_sleep_mode.load(std::memory_order_acquire);
     if (!original)
         return kVkErrorUnknown;
-    const bool off = info && TurnsLowLatencyOff(*info);
-    if (info && g_low_latency_off.exchange(off, std::memory_order_relaxed) != off)
+    if (!info)
+        return original(device, swapchain, info);
+
+    const bool frame_generation = streamline::FrameGenerationOn();
+    const bool game_sleeps = g_latency_sleep_seen.load(std::memory_order_acquire);
+    const bool off = info->low_latency_mode && Active() &&
+                     g_present_pacing_fix.load(std::memory_order_acquire) && !game_sleeps &&
+                     frame_generation;
+    if (g_low_latency_off.exchange(off, std::memory_order_relaxed) != off)
         log::Event(log::Level::Info, "reflex_present_pacing",
                    {log::Field::Bool("low_latency_off", off),
-                    log::Field::Bool("frame_generation", streamline::FrameGenerationOn()),
-                    log::Field::Bool("game_sleeps",
-                                     g_latency_sleep_seen.load(std::memory_order_acquire))});
+                    log::Field::Bool("frame_generation", frame_generation),
+                    log::Field::Bool("game_sleeps", game_sleeps)});
     if (!off)
         return original(device, swapchain, info);
     LatencySleepModeInfo sent = *info;

@@ -25,6 +25,15 @@ constexpr uint8_t kOpcodeJmpRel32 = 0xE9;
 constexpr uint8_t kOpcodeGroup5 = 0xFF; // group 5: inc, dec, call, jmp...
 constexpr uint8_t kGroupJmpIndirect = 4;
 
+// REX prefix: 0100WRXB. X and B extend the index and base registers of the
+// memory operand; R extends the ModRM `reg` field, the source register of a
+// register store.
+constexpr uint8_t kRexBase = 0x40;
+constexpr uint8_t kRexX = 0x02;
+constexpr uint8_t kRexB = 0x01;
+// ModRM: mod(2) reg(3) rm(3). Clearing `reg` selects `mov` in group 11.
+constexpr uint8_t kModRmRegMask = 0x38;
+
 bool Decoded(const std::byte* address, hde64s& decoded) {
     if (!address)
         return false;
@@ -132,15 +141,6 @@ std::optional<ByteStore> AsByteStore(const Instruction& instruction) {
 
 namespace {
 
-// REX prefix: 0100WRXB. X and B extend the index and base registers of the
-// memory operand; R extends the ModRM `reg` field, the source register here.
-constexpr uint8_t kRexBase = 0x40;
-constexpr uint8_t kRexX = 0x02;
-constexpr uint8_t kRexB = 0x01;
-// ModRM: mod(2) reg(3) rm(3). Clearing `reg` selects `mov` in group 11.
-constexpr uint8_t kModRmRegMask = 0x38;
-constexpr size_t kDisplacement32Size = 4;
-
 // A register byte store to `[base + disp32]` with no SIB byte and no prefix but
 // REX, which is the only shape AsImmediateByteStore re-encodes.
 bool IsPlainRegisterByteStore(const hde64s& decoded) {
@@ -169,7 +169,7 @@ std::optional<std::vector<std::byte>> AsImmediateByteStore(const Instruction& in
         encoded.push_back(std::byte{static_cast<uint8_t>(kRexBase | memory_rex)});
     encoded.push_back(std::byte{kOpcodeMovByteImmediate});
     encoded.push_back(std::byte{static_cast<uint8_t>(decoded.modrm & ~kModRmRegMask)});
-    for (size_t i = 0; i < kDisplacement32Size; ++i)
+    for (size_t i = 0; i < sizeof(int32_t); ++i)
         encoded.push_back(std::byte{static_cast<uint8_t>(decoded.disp.disp32 >> (8 * i))});
     encoded.push_back(std::byte{value});
     if (encoded.size() != instruction.length)

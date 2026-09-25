@@ -679,6 +679,16 @@ void TestPluginAnalysis() {
     CHECK(unfit.flip_metering && unfit.flip_metering->rewrites.empty() &&
           std::string(unfit.flip_metering->model_version_store) == "unfit");
 
+    // A constant store there is one of the stores of the on value, and its
+    // immediate is rewritten like the others.
+    PutBytes(newer, 29, {0xC6, 0x83, 0x20, 0x45, 0x00, 0x00, 0x00});   // mov [rbx+4520h], 0
+    const auto constant =
+        odg::streamline::AnalyzePlugin(Bytes(newer, kImage), Bytes(newer, kCode));
+    CHECK(constant.flip_metering &&
+          std::string(constant.flip_metering->model_version_store) == "constant");
+    CHECK(constant.flip_metering && constant.flip_metering->rewrites.size() == 1 &&
+          constant.flip_metering->rewrites[0].address == newer_base + 35);
+
     // Without the marker nothing is found, and the reason says so.
     std::vector<uint8_t> unmarked = image;
     PutText(unmarked, kMarker, "something else entirely");

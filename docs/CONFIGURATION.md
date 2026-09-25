@@ -123,7 +123,8 @@ The architecture to build kernels for, such as `86`. `0` asks the CUDA driver.
 
 **`VulkanHooks`** (default `1`)
 Handles Vulkan games, which load kernels through `VK_NVX_binary_import` instead
-of NVAPI. It has no effect in Direct3D 12 games.
+of NVAPI. It has no effect in Direct3D 12 games. It also carries the Reflex fix of
+`PatchFlipMetering`.
 
 ### `[Runtime]`
 

@@ -18,7 +18,9 @@ void SetForceMultiplier(uint32_t multiplier);
 void SetDiagnostics(bool enabled);
 
 bool InstallInterposerHooks(HMODULE interposer);
-// Whether the game has most recently asked for frame generation to be on.
+
+// Whether the game's last accepted slDLSSGSetOptions turned frame generation
+// on, including the dynamic mode.
 bool FrameGenerationOn();
 
 } // namespace odg::streamline
