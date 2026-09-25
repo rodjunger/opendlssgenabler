@@ -9,6 +9,7 @@
 #include "core/config.h"
 #include "core/log.h"
 #include "core/paths.h"
+#include "core/pe.h"
 #include "core/text.h"
 #include "core/x86.h"
 #include "kernels/cubin.h"
@@ -19,6 +20,7 @@
 #include "kernels/substitute.h"
 #include "provider/multi_frame.h"
 #include "streamline/plugin_patch.h"
+#include "vulkan/reflex_pacing.h"
 
 #include <lz4.h>
 
@@ -420,7 +422,13 @@ void TestX86() {
     const auto decoded = Decode(reinterpret_cast<const std::byte*>(store));
     CHECK(decoded && decoded->length == sizeof(store));
     const auto parsed = decoded ? AsByteStore(*decoded) : std::nullopt;
-    CHECK(parsed && parsed->displacement == 0x38BC && parsed->value == 0);
+    CHECK(parsed && parsed->base == 3 && parsed->displacement == 0x38BC && parsed->value == 0);
+
+    // mov byte ptr [r14+4520h], dil: REX.B extends the base to r14.
+    const uint8_t extended[] = {0x41, 0x88, 0xBE, 0x20, 0x45, 0x00, 0x00};
+    const auto from_register = Decode(reinterpret_cast<const std::byte*>(extended));
+    const auto field = from_register ? AsRegisterByteStore(*from_register) : std::nullopt;
+    CHECK(field && field->base == 14 && field->displacement == 0x4520);
 
     // mov byte ptr [rsp], 1 addresses through a SIB byte: not an object field.
     const uint8_t stack[] = {0xC6, 0x04, 0x24, 0x01};
@@ -453,6 +461,33 @@ void TestX86() {
 
     CHECK(!AsByteStore(*jump));
     CHECK(!JumpTarget(*decoded));
+
+    const uint8_t ret[] = {0xC3};
+    const auto returns = Decode(reinterpret_cast<const std::byte*>(ret));
+    CHECK(returns && IsReturnOrJump(*returns));
+    CHECK(IsReturnOrJump(*jump) && IsReturnOrJump(*indirect));
+    CHECK(!IsReturnOrJump(*decoded) && !IsReturnOrJump(*load));
+}
+
+// A patch to code that may be running is written in one aligned 8-byte store,
+// or not at all.
+void TestPatchRunningCode() {
+    alignas(8) uint8_t code[16] = {};
+    const uint8_t bytes[7] = {1, 2, 3, 4, 5, 6, 7};
+    CHECK(odg::pe::PatchRunningCode(code + 1, bytes, sizeof(bytes)));
+    CHECK(code[0] == 0 && std::memcmp(code + 1, bytes, sizeof(bytes)) == 0 && code[8] == 0);
+    // Crossing into the next word would take two stores.
+    CHECK(!odg::pe::PatchRunningCode(code + 2, bytes, sizeof(bytes)));
+    CHECK(code[2] == 2 && code[9] == 0);
+}
+
+// When the Reflex fix turns low latency off.
+void TestReflexPacing() {
+    using odg::vulkan::MustTurnLowLatencyOff;
+    CHECK(MustTurnLowLatencyOff(true, true, false));   // No Man's Sky with frame generation
+    CHECK(!MustTurnLowLatencyOff(true, true, true));   // a game that sleeps, such as DOOM
+    CHECK(!MustTurnLowLatencyOff(true, false, false)); // frame generation off
+    CHECK(!MustTurnLowLatencyOff(false, true, false)); // low latency already off
 }
 
 void TestPtxText() {
@@ -689,6 +724,20 @@ void TestPluginAnalysis() {
     CHECK(constant.flip_metering && constant.flip_metering->rewrites.size() == 1 &&
           constant.flip_metering->rewrites[0].address == newer_base + 35);
 
+    // A store through another register may be to another object, and a store
+    // past a ret is not on the same path. Neither counts.
+    PutBytes(newer, 29, {0x40, 0x88, 0xBE, 0x20, 0x45, 0x00, 0x00});   // mov [rsi+4520h], dil
+    const auto other_object =
+        odg::streamline::AnalyzePlugin(Bytes(newer, kImage), Bytes(newer, kCode));
+    CHECK(other_object.flip_metering &&
+          std::string(other_object.flip_metering->model_version_store) == "absent");
+    PutBytes(newer, 27, {0xC3, 0x90});                                 // ret
+    PutBytes(newer, 29, {0x40, 0x88, 0xBB, 0x20, 0x45, 0x00, 0x00});   // mov [rbx+4520h], dil
+    const auto past_ret =
+        odg::streamline::AnalyzePlugin(Bytes(newer, kImage), Bytes(newer, kCode));
+    CHECK(past_ret.flip_metering &&
+          std::string(past_ret.flip_metering->model_version_store) == "absent");
+
     // Without the marker nothing is found, and the reason says so.
     std::vector<uint8_t> unmarked = image;
     PutText(unmarked, kMarker, "something else entirely");
@@ -836,6 +885,8 @@ int main() {
     TestConditions();
     TestMultiFrameGates();
     TestPluginAnalysis();
+    TestPatchRunningCode();
+    TestReflexPacing();
     TestLogPruning();
     std::printf("%d checks, %d failed\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

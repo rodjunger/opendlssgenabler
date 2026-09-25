@@ -23,14 +23,22 @@ std::optional<Instruction> Decode(const std::byte* address);
 // a byte field of an object held in a register. Empty for anything else,
 // including stores through an index register or to the stack.
 struct ByteStore {
+    uint8_t base = 0; // the register holding the object, 0 (rax) to 15 (r15)
     int32_t displacement = 0;
     uint8_t value = 0;
 };
 std::optional<ByteStore> AsByteStore(const Instruction& instruction);
 
+// A byte field of an object held in a register.
+struct ByteField {
+    uint8_t base = 0; // 0 (rax) to 15 (r15)
+    int32_t displacement = 0;
+    bool operator==(const ByteField&) const = default;
+};
+
 // `mov byte ptr [register + disp32], r8`: a store of a byte register to such a
-// field. Returns the displacement; empty for anything else.
-std::optional<int32_t> AsRegisterByteStore(const Instruction& instruction);
+// field. Empty for anything else.
+std::optional<ByteField> AsRegisterByteStore(const Instruction& instruction);
 
 // The register store `instruction` rewritten to store the constant `value` to
 // the same field, as `mov byte ptr [register + disp32], imm8`. Empty unless the
@@ -65,6 +73,10 @@ Condition ConditionTested(const Instruction& instruction);
 
 // The condition's name, for a log line or a report.
 const char* ConditionName(Condition condition);
+
+// `ret`, or an unconditional `jmp` of any form: the instruction after it does
+// not run next.
+bool IsReturnOrJump(const Instruction& instruction);
 
 // The destination of an unconditional jump: `jmp rel32`, or `jmp [rip + rel32]`
 // through a pointer. Empty for anything else, or when the pointer cannot be

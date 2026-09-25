@@ -71,6 +71,10 @@ run`.
 | `kernel_refused`: `this runtime was not indexed` | Kernels came from a runtime the loader did not find; `caller` names it |
 | `kernel_refused`: `the calling module could not be identified` | The call came through another tool's hook while several runtimes were loaded |
 | `provider_pin_failed` | A runtime could not be kept loaded, so it was not indexed |
+| `plugin_pin_failed` | A plugin could not be kept loaded, so it was not patched |
+| `flip_metering_forced` is a warning | The pacing patch is incomplete; `stores_skipped`, `model_version_store` and `stores_patched` say why. Direct3D 12 frames may not be shown |
+| `dlssg_force_skipped` | The game's Streamline is newer than this build, so `ForceMultiplier` is not applied |
+| Vulkan game, `reflex_pacing_skipped` | Vulkan resolved Reflex before the GPU was identified; the [Reflex pacing fix](ARCHITECTURE.md#reflex-and-present-pacing) is off |
 | Black screen or freeze | Windows System event log, `nvlddmkm`, `Restarting TDR occurred`: a GPU hang |
 | Game stops responding after changing settings | `sl.log` for `PFunResizeBuffersBefore failed`, then `Pacer flush has timed out`: a swapchain resize failed. Seen in Crimson Desert, with all kernels supplied |
 | A setting seems ignored | `config_value_rejected` |
@@ -135,7 +139,7 @@ All on an RTX 3080.
 | Jurassic World Evolution 3 | Direct3D 12 | 310.3.0 | `presented` 2, 3 and 4 |
 | Indiana Jones and the Great Circle | Vulkan | 310.2.1 | 2x, 3x and 4x with path tracing, `presented: 3` captured. Runs a plugin NGX downloaded. The game requests `numFramesToGenerate` 0 when switching modes, which Streamline rejects; this is passed through unchanged |
 | Frostpunk 2 | Direct3D 12 | 310.5.2 | `presented` 2, 3 and 4. Artefacts in a cutscene at 3x, where `sl.log` shows the game's own frames arriving over 100 ms apart |
-| Crimson Desert | Direct3D 12 | 310.9.1 | Via `Mode=Bundled`, with Ray Reconstruction: `presented` 2, 3, 4, 5 and 6. The only tested game whose plugin (Streamline 2.11.1) allows 5 generated frames |
+| Crimson Desert | Direct3D 12 | 310.9.0, 310.9.1 | 310.9.1 via `Mode=Bundled`, with Ray Reconstruction: `presented` 2, 3, 4, 5 and 6. 310.9.0 via [the DLSS override](#the-dlss-override). The only tested game whose plugin (Streamline 2.11.1) allows 5 generated frames |
 | Corsair Cove | Direct3D 12 | 310.5.2 | `presented` 2 and 3; 4x accepted but not confirmed. Streamline 2.10.3, plugins NGX downloaded |
 | No Man's Sky (Microsoft Store) | Vulkan | 310.9.0 | Via the DLSS override (the game ships 310.7.0). `presented` 2, 3 and 4, 192 kernels, none refused. Streamline ran NGX plugin 134656. Needs the [Reflex pacing fix](ARCHITECTURE.md#reflex-and-present-pacing): without it, 2x dropped output from about 136 fps to 59 |
 | Palworld (Steam) | Direct3D 12 | 310.4.0 | `presented` 2, 3 and 4, 384 kernels, none refused. Needs the `-dx12` launch option (Direct3D 11 is the default and unsupported). Install the proxy as `dxgi.dll`; the game does not load `version.dll` |

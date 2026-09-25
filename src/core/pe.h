@@ -20,6 +20,12 @@ std::vector<std::span<const std::byte>> ReadableSections(HMODULE module);
 // read-only, so it is addressed as const like everywhere else it is read.
 bool PatchCode(const void* address, const void* bytes, size_t size);
 
+// The same, for code another thread may be running. The bytes are written with
+// one aligned 8-byte store, so an instruction fetch sees either all the old
+// bytes or all the new ones, never a mix that decodes as something else. False,
+// with nothing written, when they do not fit in one aligned 8-byte word.
+bool PatchRunningCode(const void* address, const void* bytes, size_t size);
+
 // memcpy that refuses, rather than faulting on, a source that is not committed
 // readable memory.
 bool SafeCopy(void* destination, const void* source, size_t size);

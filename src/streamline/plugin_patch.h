@@ -72,7 +72,10 @@ void SetPatchesEnabled(bool flip_metering, bool frame_clamp);
 // it, in case a future build is read wrongly.
 void SetFlipMeteringValue(int value);
 
-// Applies the selected patches to a loaded sl.dlss_g.dll. Idempotent.
-void PatchPlugin(HMODULE plugin);
+// Applies the selected patches to a loaded sl.dlss_g.dll, once per image.
+// `at_load` is true when called before the load returns, while none of the
+// plugin's code can be running; otherwise a patch longer than one aligned
+// 8-byte store is skipped and logged. Safe to call from any thread.
+void PatchPlugin(HMODULE plugin, bool at_load);
 
 } // namespace odg::streamline

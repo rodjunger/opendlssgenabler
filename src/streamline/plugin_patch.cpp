@@ -126,10 +126,13 @@ std::optional<x86::ByteStore> FallbackStore(const std::byte* reference) {
 }
 
 // The first store to the flag after a reference to the model-version
-// parameter. A constant store is already handled with the other stores; a
-// register store is re-encoded to store the off value, when it fits in place.
+// parameter, in the same straight-line code. A constant store is already
+// handled with the other stores; a register store is re-encoded to store the
+// off value, when it fits in place. Only a store through the register that
+// held the context at the marker's store counts: in every build seen the two
+// stores use the same one, and another register could be another object.
 void AnalyzeModelVersionStore(std::span<const std::byte> image, std::span<const std::byte> code,
-                              PluginAnalysis::FlipMetering& flip) {
+                              const x86::ByteField& flag, PluginAnalysis::FlipMetering& flip) {
     const auto parameter = hat::find_pattern(image, signature::Literal(kModelVersionParameter));
     if (!parameter.has_result())
         return;
@@ -137,14 +140,14 @@ void AnalyzeModelVersionStore(std::span<const std::byte> image, std::span<const 
         const std::byte* cursor = reference;
         for (int i = 0; i < kInstructionsAfterModelVersion; ++i) {
             const auto instruction = x86::Decode(cursor);
-            if (!instruction)
+            if (!instruction || x86::IsReturnOrJump(*instruction))
                 break;
             const auto constant = x86::AsByteStore(*instruction);
-            if (constant && constant->displacement == flip.flag_offset) {
+            if (constant && x86::ByteField{constant->base, constant->displacement} == flag) {
                 flip.model_version_store = "constant";
                 return;
             }
-            if (x86::AsRegisterByteStore(*instruction) == flip.flag_offset) {
+            if (x86::AsRegisterByteStore(*instruction) == flag) {
                 auto bytes = x86::AsImmediateByteStore(*instruction, flip.off_value);
                 if (!bytes) {
                     flip.model_version_store = "unfit";
@@ -200,7 +203,7 @@ void AnalyzeFlipMetering(std::span<const std::byte> image, std::span<const std::
             flip.rewrites.push_back(
                 {match.get() + instruction->length - 1, {std::byte{flip.off_value}}});
     }
-    AnalyzeModelVersionStore(image, code, flip);
+    AnalyzeModelVersionStore(image, code, {fallback->base, fallback->displacement}, flip);
     analysis.flip_metering = std::move(flip);
 }
 
@@ -216,7 +219,16 @@ void AnalyzeFrameClamp(std::span<const std::byte> code, PluginAnalysis& analysis
     analysis.frame_clamp = PluginAnalysis::FrameClamp{limit, matches.front().get() + kClampCmovOffset};
 }
 
-void PatchFlipMetering(const PluginAnalysis& analysis, const wchar_t* plugin) {
+// Writes a patch. At load, before any of the plugin's code has run, any
+// length is safe. Afterwards another thread may be running the code, so only a
+// patch that fits in one aligned 8-byte store is written.
+bool WritePatch(const std::byte* address, std::span<const std::byte> bytes, bool at_load) {
+    if (at_load)
+        return pe::PatchCode(address, bytes.data(), bytes.size());
+    return pe::PatchRunningCode(address, bytes.data(), bytes.size());
+}
+
+void PatchFlipMetering(const PluginAnalysis& analysis, const wchar_t* plugin, bool at_load) {
     if (!analysis.flip_metering) {
         log::Event(log::Level::Warning, "flip_metering_not_patched",
                    {log::Field::Path("plugin", plugin),
@@ -227,26 +239,31 @@ void PatchFlipMetering(const PluginAnalysis& analysis, const wchar_t* plugin) {
     const auto& flip = *analysis.flip_metering;
     size_t patched = 0;
     for (const auto& rewrite : flip.rewrites)
-        patched +=
-            pe::PatchCode(rewrite.address, rewrite.bytes.data(), rewrite.bytes.size()) ? 1 : 0;
-    log::Event(patched ? log::Level::Info : log::Level::Warning, "flip_metering_forced",
+        patched += WritePatch(rewrite.address, rewrite.bytes, at_load) ? 1 : 0;
+    const size_t skipped = flip.rewrites.size() - patched;
+    // Each of these can leave the flag able to select hardware metering.
+    const bool nothing_patched = patched == 0;
+    const bool store_left = std::strcmp(flip.model_version_store, "unfit") == 0;
+    const bool incomplete = nothing_patched || store_left || skipped > 0;
+    log::Event(incomplete ? log::Level::Warning : log::Level::Info, "flip_metering_forced",
                {log::Field::Path("plugin", plugin),
                 log::Field::Hex("flag_offset", static_cast<uint32_t>(flip.flag_offset)),
                 log::Field::Uint("off_value", flip.off_value),
                 log::Field::Bool("overridden", g_flip_value.load(std::memory_order_acquire) >= 0),
                 log::Field::Uint("stores_patched", patched),
-                log::Field::Str("model_version_store", flip.model_version_store)});
+                log::Field::Uint("stores_skipped", skipped),
+                log::Field::Str("model_version_store", flip.model_version_store),
+                log::Field::Bool("at_load", at_load)});
 }
 
-void PatchFrameClamp(const PluginAnalysis& analysis, const wchar_t* plugin) {
+void PatchFrameClamp(const PluginAnalysis& analysis, const wchar_t* plugin, bool at_load) {
     if (!analysis.frame_clamp) {
         log::Event(log::Level::Info, "frame_clamp_not_found",
                    {log::Field::Path("plugin", plugin),
                     log::Field::Uint("matches", analysis.frame_clamp_matches)});
         return;
     }
-    const bool ok =
-        pe::PatchCode(analysis.frame_clamp->cmov, kThreeByteNop, sizeof(kThreeByteNop));
+    const bool ok = WritePatch(analysis.frame_clamp->cmov, kThreeByteNop, at_load);
     log::Event(ok ? log::Level::Info : log::Level::Warning, "frame_clamp_removed",
                {log::Field::Path("plugin", plugin),
                 log::Field::Uint("compiled_limit", analysis.frame_clamp->limit)});
@@ -280,48 +297,45 @@ void SetPatchesEnabled(bool flip_metering, bool frame_clamp) {
     g_clamp_enabled.store(frame_clamp, std::memory_order_release);
 }
 
-// Called only from InspectLoadedModules, which runs on one thread at a time.
-// The check and the record below are separate lock scopes, so a second,
-// concurrent caller would need them joined first.
-void PatchPlugin(HMODULE plugin) {
+void PatchPlugin(HMODULE plugin, bool at_load) {
     if (!plugin)
         return;
 
+    // Claimed before anything else, so the load hook and the worker never both
+    // patch the same image.
     AcquireSRWLockExclusive(&g_patched_lock);
-    const PatchedPlugin* record = Find(plugin);
-    const bool flip = g_flip_enabled.load(std::memory_order_acquire) &&
-                      !(record && record->flip_metering);
-    const bool clamp = g_clamp_enabled.load(std::memory_order_acquire) &&
-                       !(record && record->frame_clamp);
+    PatchedPlugin* record = Find(plugin);
+    if (!record)
+        record = &g_patched.emplace_back(PatchedPlugin{plugin, false, false});
+    const bool flip = g_flip_enabled.load(std::memory_order_acquire) && !record->flip_metering;
+    const bool clamp = g_clamp_enabled.load(std::memory_order_acquire) && !record->frame_clamp;
+    record->flip_metering = record->flip_metering || flip;
+    record->frame_clamp = record->frame_clamp || clamp;
     ReleaseSRWLockExclusive(&g_patched_lock);
     if (!flip && !clamp)
         return;
 
     // Streamline can unload a plugin it did not choose, and the image is read
-    // and patched directly below. Pinned first, outside the lock because
-    // pinning takes the loader lock, so the image cannot go away underneath
-    // the scan, and so a handle recorded here can never name a different
-    // module later.
+    // and patched directly below, so it is pinned first. Pinning takes the
+    // loader lock, so it is done outside this engine's lock.
     if (!paths::PinModule(plugin)) {
+        // The handle is stale. Its record is dropped, so a module mapped later
+        // at the same address is not mistaken for this one.
+        AcquireSRWLockExclusive(&g_patched_lock);
+        std::erase_if(g_patched,
+                      [&](const PatchedPlugin& entry) { return entry.module == plugin; });
+        ReleaseSRWLockExclusive(&g_patched_lock);
         log::Event(log::Level::Warning, "plugin_pin_failed",
                    {log::Field::Str("note", "plugin not patched; it may already be unloaded")});
         return;
     }
 
-    AcquireSRWLockExclusive(&g_patched_lock);
-    PatchedPlugin* done = Find(plugin);
-    if (!done)
-        done = &g_patched.emplace_back(PatchedPlugin{plugin, false, false});
-    done->flip_metering = done->flip_metering || flip;
-    done->frame_clamp = done->frame_clamp || clamp;
-    ReleaseSRWLockExclusive(&g_patched_lock);
-
     const std::wstring path = paths::ModulePath(plugin);
     const PluginAnalysis analysis = AnalyzePlugin(plugin);
     if (flip)
-        PatchFlipMetering(analysis, path.c_str());
+        PatchFlipMetering(analysis, path.c_str(), at_load);
     if (clamp)
-        PatchFrameClamp(analysis, path.c_str());
+        PatchFrameClamp(analysis, path.c_str(), at_load);
 }
 
 } // namespace odg::streamline

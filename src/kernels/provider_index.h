@@ -32,7 +32,8 @@ struct IndexSummary {
     size_t kernels_with_alternatives = 0; // with a cubin for more than one architecture
     size_t ambiguous_images = 0;          // in two containers, so answering nothing
 };
-// Empty when the runtime was already indexed.
+// Empty when the runtime was already indexed. `provider` must be pinned: the
+// index points into its image for the rest of the process.
 std::optional<IndexSummary> BuildProviderIndex(HMODULE provider);
 
 // Whether this runtime has been indexed. A runtime that has not been cannot be

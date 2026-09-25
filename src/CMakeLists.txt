@@ -16,9 +16,11 @@ add_library(odg_core STATIC
     kernels/cubin_params.cpp
     kernels/substitute.cpp
     kernels/provider_index.cpp
-    kernels/vulkan_hooks.cpp
+    kernels/vulkan_route.cpp
     streamline/streamline.cpp
     streamline/plugin_patch.cpp
+    vulkan/loader_hooks.cpp
+    vulkan/reflex_pacing.cpp
     provider/multi_frame.cpp
     provider/version_policy.cpp
     proxy/proxy.cpp)

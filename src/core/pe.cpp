@@ -34,6 +34,25 @@ bool PatchCode(const void* code, const void* bytes, size_t size) {
     return true;
 }
 
+bool PatchRunningCode(const void* code, const void* bytes, size_t size) {
+    constexpr uintptr_t kWordSize = sizeof(uint64_t);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(code);
+    const uintptr_t word_start = start & ~(kWordSize - 1);
+    if (!bytes || size == 0 || start + size > word_start + kWordSize)
+        return false;
+    auto* word = reinterpret_cast<volatile LONG64*>(word_start);
+    DWORD previous = 0;
+    if (!VirtualProtect(const_cast<LONG64*>(word), kWordSize, PAGE_EXECUTE_READWRITE, &previous))
+        return false;
+    LONG64 replaced = *word;
+    std::memcpy(reinterpret_cast<std::byte*>(&replaced) + (start - word_start), bytes, size);
+    InterlockedExchange64(word, replaced);
+    DWORD ignored = 0;
+    VirtualProtect(const_cast<LONG64*>(word), kWordSize, previous, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), const_cast<LONG64*>(word), kWordSize);
+    return true;
+}
+
 namespace {
 
 bool RangeReadable(const void* address, size_t size) {

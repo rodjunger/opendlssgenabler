@@ -22,6 +22,9 @@ constexpr uint8_t kOpcodeMovByteImmediate = 0xC6; // group 11: mov r/m8, imm8
 constexpr uint8_t kOpcodeMovByteRegister = 0x88;  // mov r/m8, r8
 constexpr uint8_t kGroupMov = 0;
 constexpr uint8_t kOpcodeJmpRel32 = 0xE9;
+constexpr uint8_t kOpcodeJmpRel8 = 0xEB;
+constexpr uint8_t kOpcodeRet = 0xC3;
+constexpr uint8_t kOpcodeRetImm16 = 0xC2;
 constexpr uint8_t kOpcodeGroup5 = 0xFF; // group 5: inc, dec, call, jmp...
 constexpr uint8_t kGroupJmpIndirect = 4;
 
@@ -47,6 +50,13 @@ int32_t Displacement(const hde64s& decoded) {
     if (decoded.flags & F_DISP8)
         return static_cast<int8_t>(decoded.disp.disp8);
     return 0;
+}
+
+// The base register of a ModRM memory operand, 0 (rax) to 15 (r15). Only
+// meaningful without a SIB byte, where `rm` names it and REX.B extends it.
+constexpr uint8_t kRexExtendsRegister = 8;
+uint8_t BaseRegister(const hde64s& decoded) {
+    return decoded.modrm_rm + (decoded.rex_b ? kRexExtendsRegister : 0);
 }
 
 } // namespace
@@ -137,7 +147,7 @@ std::optional<ByteStore> AsByteStore(const Instruction& instruction) {
                                             !(decoded.flags & F_SIB);
     if (!mov_byte_immediate || !register_plus_displacement)
         return std::nullopt;
-    return ByteStore{Displacement(decoded), decoded.imm.imm8};
+    return ByteStore{BaseRegister(decoded), Displacement(decoded), decoded.imm.imm8};
 }
 
 namespace {
@@ -155,11 +165,11 @@ bool IsPlainRegisterByteStore(const hde64s& decoded) {
 
 } // namespace
 
-std::optional<int32_t> AsRegisterByteStore(const Instruction& instruction) {
+std::optional<ByteField> AsRegisterByteStore(const Instruction& instruction) {
     hde64s decoded{};
     if (!Decoded(instruction.address, decoded) || !IsPlainRegisterByteStore(decoded))
         return std::nullopt;
-    return Displacement(decoded);
+    return ByteField{BaseRegister(decoded), Displacement(decoded)};
 }
 
 std::optional<std::vector<std::byte>> AsImmediateByteStore(const Instruction& instruction,
@@ -187,6 +197,17 @@ std::optional<const std::byte*> RipRelativeOperand(const Instruction& instructio
         decoded.modrm_mod != kModIndirect || decoded.modrm_rm != kRmRipRelative)
         return std::nullopt;
     return instruction.Next() + Displacement(decoded);
+}
+
+bool IsReturnOrJump(const Instruction& instruction) {
+    hde64s decoded{};
+    if (!Decoded(instruction.address, decoded))
+        return false;
+    const bool ret = decoded.opcode == kOpcodeRet || decoded.opcode == kOpcodeRetImm16;
+    const bool direct_jmp = decoded.opcode == kOpcodeJmpRel32 || decoded.opcode == kOpcodeJmpRel8;
+    const bool indirect_jmp = decoded.opcode == kOpcodeGroup5 && (decoded.flags & F_MODRM) &&
+                              decoded.modrm_reg == kGroupJmpIndirect;
+    return ret || direct_jmp || indirect_jmp;
 }
 
 std::optional<const std::byte*> JumpTarget(const Instruction& instruction) {

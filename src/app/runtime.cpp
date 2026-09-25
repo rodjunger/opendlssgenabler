@@ -6,13 +6,13 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "kernels/substitute.h"
-#include "kernels/vulkan_hooks.h"
 #include "provider/multi_frame.h"
 #include "proxy/proxy.h"
 #include "spoof/nvapi.h"
 #include "streamline/plugin_patch.h"
 #include "streamline/streamline.h"
 #include "version.h"
+#include "vulkan/reflex_pacing.h"
 
 #include <atomic>
 #include <string>
@@ -120,7 +120,7 @@ void ApplySettings(const Settings& settings, const std::wstring& self_dir) {
 
     ConfigureKernels(settings, log_directory);
     loader::SetVulkanHooksEnabled(settings.vulkan_hooks);
-    kernels::SetPresentPacingFix(settings.patch_flip_metering);
+    vulkan::SetPresentPacingFix(settings.patch_flip_metering);
     if (settings.streamline_diagnostics)
         ArmStreamlineDiagnostics(log_directory);
     ReportHardwareScheduling();

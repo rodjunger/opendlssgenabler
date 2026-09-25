@@ -1,6 +1,7 @@
 // Reports what the in-memory patches would change in a Streamline DLSS-G plugin
 // (sl.dlss_g.dll) or an NVIDIA DLSS-G runtime (nvngx_dlssg.dll), and what the
-// kernel index finds in a runtime, without changing either. Use it to check a new build before a game runs it.
+// kernel index finds in a runtime, without changing either. Use it to check a
+// new build before a game runs it.
 //
 //   patchprobe <dll>...
 //

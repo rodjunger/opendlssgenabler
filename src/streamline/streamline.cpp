@@ -177,12 +177,12 @@ sl::Result SetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions
     // The copy below is this build's struct. A game built against a newer SDK
     // passes fields it does not have, and Streamline would read them past the
     // end of the copy, so such a request is passed through as the game made it.
-    static const uint32_t kKnownVersion = sl::DLSSGOptions{}.structVersion;
-    if (options.structVersion > kKnownVersion) {
+    static const uint32_t known_version = sl::DLSSGOptions{}.structVersion;
+    if (options.structVersion > known_version) {
         if (!g_newer_options_reported.exchange(true))
             log::Event(log::Level::Warning, "dlssg_force_skipped",
                        {log::Field::Uint("struct_version", options.structVersion),
-                        log::Field::Uint("known_version", kKnownVersion),
+                        log::Field::Uint("known_version", known_version),
                         log::Field::Str("note", "the game's Streamline is newer than this build; "
                                                 "its own multiplier is used")});
         return original(viewport, options);
@@ -208,6 +208,8 @@ sl::Result SetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions
         log::Event(log::Level::Info, "dlssg_set_options",
                    {log::Field::Str("mode", ModeName(options.mode)),
                     log::Field::Uint("num_frames", adjusted.numFramesToGenerate),
+                    log::Field::Hex("flags", static_cast<uint32_t>(adjusted.flags)),
+                    log::Field::Uint("back_buffers", adjusted.numBackBuffers),
                     log::Field::Str("result", ResultName(result)),
                     log::Field::Str("forced", "yes")});
         LogState(viewport, &adjusted, "after_set");

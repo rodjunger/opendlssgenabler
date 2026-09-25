@@ -85,8 +85,8 @@ is made: the pacing flag, and the kernels handed to the driver.
 | 4 | `nvapi64` `NvAPI_D3D12_CreateCubinComputeShaderExV2` | Kernel image replaced | Gate 4, Direct3D 12, one cubin at a time |
 | 4b | `nvapi64` `NvAPI_D3D12_CreateCuModule` | Fatbin replaced | Gate 4, Direct3D 12, runtimes from 310.7 |
 | 5 | Vulkan loader `vkGetDeviceProcAddr` and `vkGetInstanceProcAddr` | Return a wrapper for `vkCreateCuModuleNVX` | Gate 4, Vulkan |
-| 5b | Vulkan loader, through #5 | Return wrappers for `vkSetLatencySleepModeNV` and `vkLatencySleepNV`; low-latency mode off while frame generation is on and the game has not slept | [Reflex and present pacing](#reflex-and-present-pacing) |
-| 6 | `kernel32` `LoadLibraryExW` | Wakes the worker thread on each load; applies 3b while the runtime loads | Timing |
+| 5b | Vulkan loader, through #5, on Ampere only | Return wrappers for `vkSetLatencySleepModeNV` and `vkLatencySleepNV`; low-latency mode off while frame generation is on and the game has not slept | [Reflex and present pacing](#reflex-and-present-pacing) |
+| 6 | `kernel32` `LoadLibraryExW` | Wakes the worker thread on each load; applies 3 while the plugin loads and 3b while the runtime loads | Timing |
 | 7 | `sl.interposer` exports | Logged only | [Diagnostics](#diagnosing-a-problem) |
 
 Two kinds of change are used. A **hook** redirects a function to this project's
@@ -156,6 +156,12 @@ lists the loaded modules when the `LoadLibraryExW` hook wakes it, and once a
 second otherwise, because a module loaded as a static import never passes
 through `LoadLibraryExW`. Each pass is a *module scan*: any new NVIDIA
 component it finds is identified, pinned and patched or hooked.
+
+The plugin and the runtime are patched earlier, on the thread that loads them:
+the `LoadLibraryExW` hook patches them before the load returns, so none of
+their code has run yet. Writing bytes is safe there; installing a hook is not
+(see the rules below). While such a load is under way, the worker leaves both
+alone. It only patches a copy that was already loaded when the hooks went in.
 
 The caller of `GetArchInfo` is identified by the module that contains the
 hook's return address, mapped back to the component it is (see
@@ -288,8 +294,10 @@ decision everywhere:
 5. Newer builds read the NGX parameter `DLSSG.ModelVersion` and store the
    result to the flag: on for version `0x200` or above. Some builds store it
    from a register (`mov byte ptr [rbx+0x4520], dil`), which step 4 cannot
-   find. That store is rewritten in place to store the off value, but only if
-   the new instruction is exactly as long. `model_version_store` in
+   find. The first store to the flag after the parameter's reference, through
+   the same register as the store in step 3 and before any `ret` or `jmp`, is
+   rewritten in place to store the off value, but only if the new instruction
+   is exactly as long. `model_version_store` in
    `flip_metering_forced` says what was found: `absent`, `constant` (already
    covered by step 4), `register` (rewritten) or `unfit` (left unchanged).
 
@@ -325,6 +333,17 @@ is pinned first (as the proxy pins itself, see [startup](#startup-opening-the-ga
 because Streamline can unload the copy it did not choose while it is being
 read. A plugin that cannot be pinned is skipped and logged as
 `plugin_pin_failed`.
+
+The plugin is normally patched while it loads, before its code runs
+(`at_load: true`). A copy the worker finds already loaded may be running, so
+each rewrite is written with one aligned 8-byte store, which a running thread
+sees whole or not at all. A rewrite that does not fit in one, such as a 7-byte
+register store that crosses an 8-byte boundary, is skipped and counted in
+`stores_skipped`.
+
+`flip_metering_forced` is a warning when nothing was patched, a rewrite was
+skipped, or `model_version_store` is `unfit`: in each case the flag may still
+select hardware metering.
 
 ### Reflex and present pacing
 
@@ -364,9 +383,12 @@ What it leaves alone:
   whose first sleep comes after frame generation is on loses low latency until
   its next swapchain.
 - **Frame generation off.** The game's own setting is passed through.
-- **Other GPUs.**
+- **Other GPUs.** The wrappers are not handed out.
 
-It follows `PatchFlipMetering`, and needs `VulkanHooks`.
+It follows `PatchFlipMetering`, and needs `VulkanHooks`. Whether to hand out the
+wrappers is decided when Vulkan first resolves either function, and kept, so
+the two are always wrapped together. If that happens before NVAPI has reported
+the GPU, the fix stays off and `reflex_pacing_skipped` is logged.
 
 ## Gate 4: kernels
 
@@ -564,7 +586,9 @@ cubin_params_located struct_size=0x50 data_offset=0x18 size_offset=0x20 name_off
 No module exports `vkCreateCuModuleNVX`; the Vulkan loader hands it out. Both
 `vkGetDeviceProcAddr` and `vkGetInstanceProcAddr` are hooked, since the instance
 resolver also returns device functions. Missing either would let an
-unrunnable image reach the driver.
+unrunnable image reach the driver. `vkGetDeviceProcAddr` can return a different
+function for each device, so each wrapper calls the one resolved for the device
+it is called with.
 
 A cubin's length is read from its ELF header and includes the program headers,
 which come after the section table. Stopping at the section table truncates the
@@ -714,11 +738,11 @@ In that case, set them as user environment variables (`setx SL_LOG_LEVEL 2`,
 **Black screen or freeze.** Usually a GPU hang, which Windows logs in the System
 event log as `nvlddmkm`, `Restarting TDR occurred`.
 
-**`vulkan_hooks_unavailable`.** The Vulkan loader was present but a resolver
-could not be hooked; `device_resolver` and `instance_resolver` say which. Many
-Direct3D 12 games load and unload the Vulkan loader just to probe it; a loader
-that is already gone is retried later and is not an error. Direct3D 12 games are
-unaffected. In a Vulkan game, frame generation will have no runnable kernels.
+**`vulkan_hooks_unavailable`.** The Vulkan loader was loaded but a resolver
+could not be hooked; `device_resolver` and `instance_resolver` say which. This
+is not retried. Direct3D 12 games are unaffected. In a Vulkan game, frame
+generation may have no runnable kernels. Many Direct3D 12 games load and unload
+the Vulkan loader just to probe it; that is not an error and logs nothing.
 
 ## Source map
 
@@ -730,7 +754,8 @@ unaffected. In a Vulkan game, frame generation will have no runnable kernels.
 | `src/core` | Logging, INI, UTF-8, PE helpers, x86 decoding, the hook installer |
 | `src/spoof` | NVAPI: the architecture answer, the priority stub, the D3D12 kernel route |
 | `src/streamline` | Interposer diagnostics, frame-generation state, plugin patches |
-| `src/kernels` | Kernel decisions, fatbin and cubin handling, native cubin index, Vulkan route, Reflex pacing fix |
+| `src/kernels` | Kernel decisions, fatbin and cubin handling, native cubin index, Vulkan kernel route |
+| `src/vulkan` | Vulkan loader resolver hooks; the Reflex pacing fix |
 | `src/provider` | Runtime identification and version; the multi-frame gates |
 | `tests` | Unit tests for the pure logic |
 | `tools/ptxprobe` | Compiles a runtime's kernels against the installed driver, without a game |
