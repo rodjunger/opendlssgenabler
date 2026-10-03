@@ -16,11 +16,12 @@ namespace {
 struct Tested {
     uint16_t major, minor, build;
 };
-constexpr std::array<Tested, 7> kTested{{{310, 2, 1},
+constexpr std::array<Tested, 8> kTested{{{310, 2, 1},
                                          {310, 3, 0},
                                          {310, 4, 0},
                                          {310, 5, 2},
                                          {310, 6, 0},
+                                         {310, 7, 0},
                                          {310, 9, 0},
                                          {310, 9, 1}}};
 

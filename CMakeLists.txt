@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(opendlssg-fg
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "Open source DLSS Frame Generation for RTX 30"
     LANGUAGES C CXX)
 
