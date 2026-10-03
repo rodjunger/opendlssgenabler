@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <cstddef>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -44,12 +45,17 @@ struct Gate {
 
 // Every comparison against Blackwell's id, classified. Changes nothing.
 std::vector<Gate> FindMultiFrameGates(HMODULE provider);
+// The same, over `code` within `image`, the span a published parameter's name
+// has to lie in.
+std::vector<Gate> FindMultiFrameGates(std::span<const std::byte> image,
+                                      std::span<const std::byte> code);
 
 void SetMultiFrameEnabled(bool enabled);
 bool MultiFrameEnabled();
 
-// Rewrites the gates once per process. `at_load` records whether this ran
-// inside the load, before any of the runtime's code could run.
+// Rewrites the gates in `provider`. The caller has pinned it and calls this
+// once per runtime. `at_load` records whether this ran inside the load, before
+// the caller could reach any of the runtime's code.
 void UnlockMultiFrame(HMODULE provider, bool at_load);
 
 } // namespace odg::provider

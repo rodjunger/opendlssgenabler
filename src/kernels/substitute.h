@@ -1,9 +1,12 @@
 #pragma once
 
+#include "kernels/cubin_params.h"
+
 #include <windows.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -40,8 +43,10 @@ void Configure(const Options& options);
 // when the CUDA driver cannot be reached.
 void Activate(uint32_t architecture, uint32_t implementation);
 
-// Configured, switched on, and active on this GPU.
-bool RetargetingEnabled();
+// Configured and active on this GPU. Decisions are made whenever this holds;
+// Options::enabled only decides whether a replacement is supplied or the image
+// is refused.
+bool Active();
 
 // Architecture substitutions target, resolved once and cached. Called ahead of
 // time from the worker thread, so the first kernel creation does not pay for
@@ -50,34 +55,58 @@ uint32_t TargetSm();
 
 enum class Decision { Unchanged, Substituted, Refused };
 
-// Who asked, for the log.
 // How a kernel reached the driver, named once so the hooks and the log agree.
 inline constexpr const char* kRouteD3D12 = "d3d12";
 inline constexpr const char* kRouteVulkan = "vulkan";
 
+// Who asked, for the answer and for the log.
 struct Request {
     const char* route = ""; // kRouteD3D12 or kRouteVulkan
     HMODULE module = nullptr; // runtime that made the call, and whose own images
                               // are the only ones it can be answered from
     std::string caller;      // its file name, for the log
     std::string kernel;      // entry point, when the route names it
+
+    // A request from the code at `return_address`, the hook's caller.
+    static Request From(const char* route, const void* return_address);
+};
+
+// What the driver receives in place of the runtime's image.
+struct Substitution {
+    std::vector<uint8_t> image;
+    uint32_t source_arch = 0; // architecture the replacement was built from
 };
 
 // Decides what the driver receives for `blob`. On Substituted, `out` holds the
 // replacement.
-Decision Decide(const void* blob, size_t size, const Request& request, std::vector<uint8_t>& out);
+Decision Decide(const void* blob, size_t size, const Request& request, Substitution& out);
 
-// After the driver rejects a substitution built from newer PTX (see
-// PtxSource::Newest), rebuilds it from the closest PTX into `out`. Returns false
-// when there is nothing different to try. The caller tries the driver once more
-// and reports that result.
+// After the driver rejects `out`, a substitution built from newer PTX (see
+// PtxSource::Newest), rebuilds it from the closest PTX. Returns false when there
+// is nothing different to try. The caller tries the driver once more and
+// reports that result.
 bool Fallback(const void* blob, size_t size, uint32_t status, const Request& request,
-              std::vector<uint8_t>& out);
+              Substitution& out);
 
 // Records the driver's answer for a substituted image. A refusal is reported and
 // returned to the runtime unchanged; the original is never tried instead,
 // because it is by construction an image this GPU cannot run.
 void ReportDriverResult(uint32_t status, const char* route);
+
+// Hands the driver `substitution` through `create`, which passes it one image
+// and returns the driver's status, 0 for success. A refusal of an image built
+// from newer PTX is retried once from the closest, and the final answer is
+// reported. Every route calls the driver this way.
+template <typename Create>
+auto CreateSubstituted(const void* blob, size_t size, const Request& request,
+                       Substitution& substitution, Create&& create) {
+    auto status = create(substitution.image);
+    if (status != 0 &&
+        Fallback(blob, size, static_cast<uint32_t>(status), request, substitution))
+        status = create(substitution.image);
+    ReportDriverResult(static_cast<uint32_t>(status), request.route);
+    return status;
+}
 
 // Writes the totals once the count has stopped moving, so a report says at a
 // glance how many kernels were supplied and how. Call it from a periodic scan:
@@ -85,13 +114,14 @@ void ReportDriverResult(uint32_t status, const char* route);
 // written until the total changes again.
 void ReportSummary();
 
-// D3D12 route: rewrites the container referenced by an NVAPI cubin-creation
-// parameter block. On Substituted, Revert restores the caller's own pointer and
-// length after the call.
-Decision Apply(void* params, const void* return_address);
-// Fallback for the D3D12 route: rewrites the block Apply substituted. Revert
-// still restores the caller's own image afterwards.
-bool ApplyFallback(void* params, uint32_t status);
-void Revert(void* params);
+// The image an NVAPI cubin-creation parameter block carries, on the D3D12
+// cubin route. The block's layout is found once and then reused.
+struct CubinCall {
+    BlobFields fields;
+    const void* data = nullptr;
+    size_t size = 0;
+    std::string kernel;
+};
+std::optional<CubinCall> ReadCubinCall(void* params);
 
 } // namespace odg::kernels

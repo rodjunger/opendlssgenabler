@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <charconv>
-#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -52,10 +51,6 @@ constexpr size_t kMaxContainerSize = 256u << 20;
 // nvcc aligns every payload to 8 bytes.
 constexpr size_t kPayloadAlignment = 8;
 
-std::span<const uint8_t> View(const void* blob, size_t size) {
-    return blob ? std::span(static_cast<const uint8_t*>(blob), size) : std::span<const uint8_t>{};
-}
-
 // A container can be recognised from its header alone, which is all a caller
 // has when it is probing a pointer whose length it does not yet know.
 std::optional<FileHeader> ContainerHeader(std::span<const uint8_t> data) {
@@ -67,8 +62,10 @@ std::optional<FileHeader> ContainerHeader(std::span<const uint8_t> data) {
 }
 
 bool Decompress(std::span<const uint8_t> in, size_t out_size, std::vector<uint8_t>& out) {
-    constexpr size_t kLz4Limit = std::numeric_limits<int>::max();
-    if (in.size() > kLz4Limit || out_size > kLz4Limit)
+    // The decompressed length comes from the image's own header. A PTX module
+    // never approaches the container limit, so a larger claim is corruption,
+    // not something to allocate for.
+    if (in.size() > kMaxContainerSize || out_size > kMaxContainerSize)
         return false;
     out.resize(out_size);
     const int written =
@@ -158,15 +155,17 @@ bool CanRun(bool is_ptx, uint32_t image, uint32_t device) {
 }
 
 size_t ContainerSize(const void* blob, size_t size) {
-    const auto header = ContainerHeader(View(blob, size));
+    const auto header = ContainerHeader(bytes::View(blob, size));
     return header ? header->header_size + static_cast<size_t>(header->fat_size) : 0;
 }
 
 bool Describe(const void* blob, size_t size, std::vector<Image>& images) {
     images.clear();
-    const auto container = View(blob, size);
+    const auto container = bytes::View(blob, size);
     const auto header = ContainerHeader(container);
-    if (!header || header->fat_size > size - header->header_size)
+    // The header states its own length, so a caller's `size` can be shorter
+    // than it; checked first, or the subtraction below wraps.
+    if (!header || header->header_size > size || header->fat_size > size - header->header_size)
         return false;
 
     size_t offset = header->header_size;
@@ -198,7 +197,7 @@ bool Retarget(const void* blob, size_t size, uint32_t arch, std::vector<uint8_t>
     std::vector<Image> images;
     if (!Describe(blob, size, images))
         return false;
-    const auto container = View(blob, size);
+    const auto container = bytes::View(blob, size);
 
     report.images = static_cast<uint32_t>(images.size());
     std::vector<const Image*> candidates;

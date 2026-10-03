@@ -120,6 +120,21 @@ Field Field::Str(std::string_view key, std::string_view value) {
 Field Field::Str(std::string_view key, const wchar_t* value) {
     return {key, Quote(value ? text::ToUtf8(value) : std::string())};
 }
+namespace {
+
+// Whether `path` is `directory` or inside it. Only the whole directory counts:
+// C:\Users\bob is not a prefix of C:\Users\bobby.
+bool IsUnderDirectory(const std::wstring& path, const std::wstring& directory) {
+    if (directory.empty() || path.size() < directory.size())
+        return false;
+    if (_wcsnicmp(path.c_str(), directory.c_str(), directory.size()) != 0)
+        return false;
+    if (path.size() == directory.size())
+        return true;
+    const wchar_t next = path[directory.size()];
+    return next == L'\\' || next == L'/';
+}
+
 // The profile directory, read once. An account name appears in a logged path
 // only through this prefix: everything else is an install location.
 const std::wstring& ProfileDirectory() {
@@ -131,13 +146,14 @@ const std::wstring& ProfileDirectory() {
     return profile;
 }
 
+} // namespace
+
 Field Field::Path(std::string_view key, const wchar_t* value) {
     if (!value)
         return Str(key, std::string_view{});
     std::wstring path = value;
     const std::wstring& profile = ProfileDirectory();
-    if (!profile.empty() && path.size() >= profile.size() &&
-        _wcsnicmp(path.c_str(), profile.c_str(), profile.size()) == 0)
+    if (IsUnderDirectory(path, profile))
         path.replace(0, profile.size(), L"%USERPROFILE%");
     return Str(key, path.c_str());
 }

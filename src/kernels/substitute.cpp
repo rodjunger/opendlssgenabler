@@ -64,18 +64,6 @@ std::atomic<bool> g_fields_found{false};
 std::atomic<bool> g_fields_miss_reported{false};
 std::mutex g_fields_mutex;
 
-struct Saved {
-    void* params = nullptr;
-    const void* data = nullptr;
-    size_t size = 0;
-    Request request;
-};
-thread_local Saved t_saved;
-thread_local std::vector<uint8_t> t_buffer;
-// Architecture of the PTX this thread's last substitution was built from, so a
-// driver rejection can be retried from a more conservative source.
-thread_local uint32_t t_last_source_arch = 0;
-
 std::string Hex(const uint8_t* bytes, size_t size) {
     static constexpr char kDigits[] = "0123456789abcdef";
     std::string text;
@@ -248,7 +236,7 @@ Decision DecideFrom(HMODULE caller, const void* blob, size_t size, PtxSource sou
                     uint32_t target, std::vector<uint8_t>& out, Report& report,
                     const char*& reason) {
     if (!target || !blob || !size) {
-        reason = !RetargetingEnabled() ? "inactive" : target ? "empty" : "no target architecture";
+        reason = !Active() ? "inactive" : target ? "empty" : "no target architecture";
         return Decision::Unchanged;
     }
     if (const uint32_t cubin_arch = CubinArch(blob, size))
@@ -285,48 +273,64 @@ void Activate(uint32_t architecture, uint32_t implementation) {
                    {log::Field::Bool("enabled", g_options.enabled)});
 }
 
-bool RetargetingEnabled() {
-    return g_configured.load(std::memory_order_acquire) && g_options.enabled &&
-           g_active.load(std::memory_order_acquire);
+bool Active() {
+    return g_configured.load(std::memory_order_acquire) && g_active.load(std::memory_order_acquire);
 }
 
 uint32_t TargetSm() {
-    return RetargetingEnabled() ? ResolveTarget() : 0;
+    return Active() ? ResolveTarget() : 0;
 }
 
-Decision Decide(const void* blob, size_t size, const Request& request, std::vector<uint8_t>& out) {
+Request Request::From(const char* route, const void* return_address) {
+    Request request;
+    request.route = route;
+    request.module = paths::ModuleForAddress(return_address);
+    request.caller = paths::ModuleNameForAddress(return_address);
+    return request;
+}
+
+Decision Decide(const void* blob, size_t size, const Request& request, Substitution& out) {
     Report report;
     const char* reason = "";
     const uint32_t target = TargetSm();
     const uint32_t index = g_decisions.fetch_add(1, std::memory_order_relaxed);
-    const Decision decision =
-        DecideFrom(request.module, blob, size, PreferredSource(), target, out, report, reason);
-    t_last_source_arch = decision == Decision::Substituted ? report.source_arch : 0;
+    Decision decision = DecideFrom(request.module, blob, size, PreferredSource(), target,
+                                   out.image, report, reason);
+    // With retargeting switched off the decision is still made, because an
+    // image this GPU cannot run must not reach the driver either way: on
+    // Vulkan it loads and then hangs the GPU. Only the replacement is withheld.
+    if (decision == Decision::Substituted && !g_options.enabled) {
+        decision = Decision::Refused;
+        reason = "retargeting is switched off";
+    }
+    out.source_arch = decision == Decision::Substituted ? report.source_arch : 0;
 
     // Only decisions are dumped: the cap is small, and images passed through
     // unchanged, such as the upscaler's, would otherwise use it up first.
     if (decision != Decision::Unchanged) {
         Dump(blob, size, index, L"in");
         if (decision == Decision::Substituted)
-            Dump(out.data(), out.size(), index, L"out");
+            Dump(out.image.data(), out.image.size(), index, L"out");
     }
     LogDecision(decision, request, report, target,
-                decision == Decision::Substituted ? out.size() : size, reason);
+                decision == Decision::Substituted ? out.image.size() : size, reason);
     return decision;
 }
 
 bool Fallback(const void* blob, size_t size, uint32_t status, const Request& request,
-              std::vector<uint8_t>& out) {
-    const uint32_t rejected_source = t_last_source_arch;
-    t_last_source_arch = 0;
+              Substitution& out) {
+    const uint32_t rejected_source = out.source_arch;
     if (PreferredSource() == PtxSource::Closest || !rejected_source)
         return false;
     Report report;
     const char* reason = "";
-    if (DecideFrom(request.module, blob, size, PtxSource::Closest, TargetSm(), out, report,
+    std::vector<uint8_t> image;
+    if (DecideFrom(request.module, blob, size, PtxSource::Closest, TargetSm(), image, report,
                    reason) != Decision::Substituted ||
         report.source_arch == rejected_source)
         return false;
+    out.image = std::move(image);
+    out.source_arch = report.source_arch;
     log::Event(log::Level::Warning, "kernel_fallback",
                {log::Field::Str("route", request.route), log::Field::Str("kernel", request.kernel),
                 log::Field::Hex("status", status), log::Field::Uint("rejected_sm", rejected_source),
@@ -366,48 +370,15 @@ void ReportDriverResult(uint32_t status, const char* route) {
                     log::Field::Uint("device_sm", g_target_sm.load(std::memory_order_acquire))});
 }
 
-Decision Apply(void* params, const void* return_address) {
-    t_saved = Saved{};
-    if (!RetargetingEnabled() || !params)
-        return Decision::Unchanged;
-
-    BlobFields fields;
-    if (!Fields(params, fields))
-        return Decision::Unchanged;
-
-    size_t size = 0;
-    const void* data = ReadBlob(params, fields, size);
-    if (!data || !size)
-        return Decision::Unchanged;
-
-    Request request;
-    request.route = kRouteD3D12;
-    request.module = paths::ModuleForAddress(return_address);
-    request.caller = paths::ModuleNameForAddress(return_address);
-    request.kernel = ReadName(params, fields);
-    const Decision decision = Decide(data, size, request, t_buffer);
-    if (decision == Decision::Substituted) {
-        t_saved = Saved{params, data, size, request};
-        WriteBlob(params, fields, t_buffer.data(), t_buffer.size());
-    }
-    return decision;
-}
-
-bool ApplyFallback(void* params, uint32_t status) {
-    BlobFields fields;
-    if (!params || t_saved.params != params || !Fields(params, fields) ||
-        !Fallback(t_saved.data, t_saved.size, status, t_saved.request, t_buffer))
-        return false;
-    WriteBlob(params, fields, t_buffer.data(), t_buffer.size());
-    return true;
-}
-
-void Revert(void* params) {
-    BlobFields fields;
-    if (!params || t_saved.params != params || !Fields(params, fields))
-        return;
-    WriteBlob(params, fields, t_saved.data, t_saved.size);
-    t_saved = Saved{};
+std::optional<CubinCall> ReadCubinCall(void* params) {
+    CubinCall call;
+    if (!params || !Fields(params, call.fields))
+        return std::nullopt;
+    call.data = ReadBlob(params, call.fields, call.size);
+    if (!call.data || !call.size)
+        return std::nullopt;
+    call.kernel = ReadName(params, call.fields);
+    return call;
 }
 
 } // namespace odg::kernels

@@ -45,6 +45,8 @@ struct Field {
 };
 
 void Open(const std::wstring& directory, Level level, std::wstring_view stream);
+// Only the unit tests close the log; the product keeps it open until the
+// process exits.
 void Close();
 Level CurrentLevel();
 bool Enabled(Level level);

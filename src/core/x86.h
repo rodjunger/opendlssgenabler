@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 // Decoding of single x86-64 instructions, on top of HDE64, the decoder MinHook
 // bundles. Callers ask what an instruction does, not how it is encoded.
@@ -22,10 +23,31 @@ std::optional<Instruction> Decode(const std::byte* address);
 // a byte field of an object held in a register. Empty for anything else,
 // including stores through an index register or to the stack.
 struct ByteStore {
+    uint8_t base = 0; // the register holding the object, 0 (rax) to 15 (r15)
     int32_t displacement = 0;
     uint8_t value = 0;
 };
 std::optional<ByteStore> AsByteStore(const Instruction& instruction);
+
+// A byte field of an object held in a register.
+struct ByteField {
+    uint8_t base = 0; // 0 (rax) to 15 (r15)
+    int32_t displacement = 0;
+    bool operator==(const ByteField&) const = default;
+};
+
+// `mov byte ptr [register + disp32], r8`: a store of a byte register to such a
+// field. Empty for anything else.
+std::optional<ByteField> AsRegisterByteStore(const Instruction& instruction);
+
+// The register store `instruction` rewritten to store the constant `value` to
+// the same field, as `mov byte ptr [register + disp32], imm8`. Empty unless the
+// new encoding is exactly as long as the old one, so it can replace it in
+// place. It fits when the old store needed a REX prefix only for its source
+// register (`sil`, `dil`, `bpl`, `spl`, `r8b` and up), since the immediate form
+// has no source register and drops that byte.
+std::optional<std::vector<std::byte>> AsImmediateByteStore(const Instruction& instruction,
+                                                           uint8_t value);
 
 // The address a `[rip + disp32]` memory operand refers to, such as the string
 // a `lea` loads. Empty for an instruction without one.
@@ -51,6 +73,10 @@ Condition ConditionTested(const Instruction& instruction);
 
 // The condition's name, for a log line or a report.
 const char* ConditionName(Condition condition);
+
+// `ret`, or an unconditional `jmp` of any form: the instruction after it does
+// not run next.
+bool IsReturnOrJump(const Instruction& instruction);
 
 // The destination of an unconditional jump: `jmp rel32`, or `jmp [rip + rel32]`
 // through a pointer. Empty for anything else, or when the pointer cannot be

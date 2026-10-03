@@ -5,12 +5,14 @@
 #include "core/paths.h"
 #include "kernels/provider_index.h"
 #include "kernels/substitute.h"
-#include "kernels/vulkan_hooks.h"
+#include "kernels/vulkan_route.h"
 #include "provider/multi_frame.h"
 #include "provider/version_policy.h"
 #include "spoof/nvapi.h"
 #include "streamline/plugin_patch.h"
 #include "streamline/streamline.h"
+#include "vulkan/loader_hooks.h"
+#include "vulkan/reflex_pacing.h"
 
 #include <windows.h>
 
@@ -40,6 +42,8 @@ constexpr DWORD kDataOnlyLoad =
 
 // NVIDIA's frame-generation runtime, as games and NGX load it.
 constexpr wchar_t kRuntimeName[] = L"nvngx_dlssg.dll";
+// Streamline's frame-generation plugin.
+constexpr wchar_t kPluginName[] = L"sl.dlss_g.dll";
 
 using PfnLoadLibraryExW = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
 
@@ -48,43 +52,73 @@ std::atomic<bool> g_vulkan_hooks{false};
 // Every DLSS-G runtime this process has mapped, in the order they arrived.
 // A driver profile with the DLSS override enabled makes NGX load a runtime of
 // its own beside the one the game ships, and the kernels come from whichever it
-// picked, so both are prepared and both are indexed.
+// picked, so both are prepared and both are indexed. This list is the one
+// record of which runtimes exist and what has been done to each; the code that
+// patches and indexes them keeps none of its own.
+struct Runtime {
+    HMODULE module = nullptr;
+    bool gates_claimed = false; // multi-frame unlock attempted, or under way
+};
 std::mutex g_runtimes_mutex;
-std::vector<HMODULE> g_runtimes;
+std::vector<Runtime> g_runtimes;
 std::atomic<int> g_nvapi_attempts{0};
+// Loads of the runtime or the plugin under way on any thread. Each is patched
+// on its loading thread before the load returns, while none of its code can be
+// running yet. The worker leaves both alone while this is non-zero, so it can
+// never claim a component first and let the load return before the patch is
+// written.
+std::atomic<int> g_component_loads{0};
 HANDLE g_wake = nullptr;
 
 std::wstring g_redirect_path;
 std::atomic<bool> g_redirect_reported{false};
 thread_local bool t_in_redirect = false;
 
-// NGX stores the runtime it downloads as <architecture>_<application id>.bin in
+// NGX stores the files it downloads as <architecture>_<application id>.bin in
 // its model directory, so a load is recognised by the component the path names,
 // not by the file name it carries.
-bool NamesRuntime(LPCWSTR file_name) {
+bool NamesComponent(LPCWSTR file_name, const wchar_t* component) {
     // ComponentFileName canonicalises only the NGX store's names; every other
     // path keeps the case its caller wrote, and Windows file names do not care.
     return file_name && paths::FileNameEqualsInsensitive(paths::ComponentFileName(file_name),
-                                                        kRuntimeName);
+                                                        component);
+}
+
+bool NamesRuntime(LPCWSTR file_name) {
+    return NamesComponent(file_name, kRuntimeName);
+}
+
+// Checked after the worker has listed the modules: a component it found was
+// mapped by a load that either is still under way, and will patch it itself,
+// or has finished, and has already claimed it.
+bool ComponentLoading() {
+    return g_component_loads.load(std::memory_order_seq_cst) > 0;
+}
+
+// The record for `module`. Called with g_runtimes_mutex held.
+Runtime* Find(HMODULE module) {
+    for (Runtime& runtime : g_runtimes) {
+        if (runtime.module == module)
+            return &runtime;
+    }
+    return nullptr;
+}
+
+bool Known(HMODULE module) {
+    std::lock_guard lock(g_runtimes_mutex);
+    return Find(module) != nullptr;
 }
 
 // Records a runtime and returns false when it was already known, so each is
 // prepared once. NGX unloads a runtime once it has read what it wanted from it,
-// and this handle is kept and re-examined on every rescan, so it is pinned
-// first. Pinning before the lock is taken, rather than under it, keeps this
-// engine's lock off the path to the loader lock: PinModule takes the loader
-// lock, and this function itself runs under it, inside the LoadLibraryExW hook.
-bool Known(HMODULE module) {
-    std::lock_guard lock(g_runtimes_mutex);
-    return std::find(g_runtimes.begin(), g_runtimes.end(), module) != g_runtimes.end();
-}
-
+// and this handle is kept and re-examined on every rescan, and the index points
+// into its image, so it is pinned before it is recorded. Pinning takes the
+// loader lock, and a load made from inside another DLL's DllMain reaches here
+// holding it already, so the pin is taken outside this engine's lock rather
+// than under it, which would invert the two.
 bool RecordRuntime(HMODULE module) {
     if (!module || Known(module))
         return false;
-    // Pinned outside the lock, because PinModule takes the loader lock and this
-    // function itself runs under it, inside the LoadLibraryExW hook. Holding
-    // this engine's lock across that acquisition would invert the two.
     if (!paths::PinModule(module)) {
         // The handle was stale, or the loader refused. Either way the image
         // cannot be relied on to stay mapped, so it is left alone rather than
@@ -95,15 +129,30 @@ bool RecordRuntime(HMODULE module) {
         return false;
     }
     std::lock_guard lock(g_runtimes_mutex);
-    if (std::find(g_runtimes.begin(), g_runtimes.end(), module) != g_runtimes.end())
+    if (Find(module))
         return false;
-    g_runtimes.push_back(module);
+    g_runtimes.push_back(Runtime{module});
     return true;
 }
 
 std::vector<HMODULE> KnownRuntimes() {
     std::lock_guard lock(g_runtimes_mutex);
-    return g_runtimes;
+    std::vector<HMODULE> modules;
+    for (const Runtime& runtime : g_runtimes)
+        modules.push_back(runtime.module);
+    return modules;
+}
+
+// True for exactly one caller per runtime, so its gates are rewritten only once.
+// The worker does not try while a load is under way (see g_component_loads),
+// so a load never loses its runtime to the worker.
+bool ClaimGates(HMODULE module) {
+    std::lock_guard lock(g_runtimes_mutex);
+    Runtime* runtime = Find(module);
+    if (!runtime || runtime->gates_claimed)
+        return false;
+    runtime->gates_claimed = true;
+    return true;
 }
 
 // Experimental: loads the configured runtime in place of whichever one is being
@@ -140,6 +189,28 @@ void ReportProvider(HMODULE module) {
                     log::Field::Str("note", "not verified yet; please report whether it works")});
 }
 
+// Multi-frame generation is unlocked only on a GPU this engine enables. On a
+// GPU that runs DLSS-G natively the gates are NVIDIA's decision to keep: moving
+// them on Ada would switch on multi-frame paths whose kernels Ada does not have.
+// Each runtime is claimed once, so this is safe to call on every scan.
+void MaybeUnlockMultiFrame(HMODULE module, bool at_load) {
+    switch (spoof::nvapi::RealArchitecture()) {
+    case spoof::nvapi::Architecture::Supported:
+        if (ClaimGates(module))
+            provider::UnlockMultiFrame(module, at_load);
+        break;
+    case spoof::nvapi::Architecture::Unknown:
+        // Streamline asks the architecture long before the runtime loads, so
+        // this is not expected. The next scan retries once NVAPI has answered.
+        if (at_load)
+            log::Event(log::Level::Warning, "multi_frame_deferred",
+                       {log::Field::Str("note", "runtime loaded before the GPU was identified")});
+        break;
+    case spoof::nvapi::Architecture::NotNeeded:
+        break;
+    }
+}
+
 // Called on every module scan. Indexing happens before the runtime creates any
 // kernel, and resolving the target here keeps the cost of initializing CUDA off
 // the game's render thread.
@@ -156,13 +227,19 @@ void InspectProvider() {
     for (HMODULE module : paths::LoadedComponents(kRuntimeName))
         RecordRuntime(module);
 
-    for (HMODULE module : KnownRuntimes()) {
-        if (!provider::IsDlssgProvider(module) || kernels::ProviderIndexed(module))
+    const std::vector<HMODULE> runtimes = KnownRuntimes();
+    const bool loading = ComponentLoading();
+    for (HMODULE module : runtimes) {
+        if (!provider::IsDlssgProvider(module))
+            continue;
+        // Normally already done inside the load. This covers a runtime that
+        // arrived some other way, or one that loaded before NVAPI had said what
+        // the GPU is.
+        if (!loading)
+            MaybeUnlockMultiFrame(module, false);
+        if (kernels::ProviderIndexed(module))
             continue;
         ReportProvider(module);
-        // Normally already done inside the load; this covers a runtime that
-        // arrived some other way.
-        provider::UnlockMultiFrame(module, false);
         kernels::BuildProviderIndex(module);
     }
 
@@ -171,6 +248,14 @@ void InspectProvider() {
     // nothing until NVAPI has identified the GPU, so it is asked on every scan
     // until it does; after that it is an atomic load.
     kernels::TargetSm();
+}
+
+// Which Vulkan functions are wrapped, and by what: the kernel route's and the
+// Reflex fix's, each null for functions it does not own.
+vulkan::PfnVoidFunction VulkanWrapper(vulkan::Function function) {
+    if (vulkan::PfnVoidFunction wrapper = kernels::VulkanWrapper(function))
+        return wrapper;
+    return vulkan::ReflexWrapper(function);
 }
 
 // Runs on the worker thread and once from Start, never under the loader lock:
@@ -184,23 +269,24 @@ void InspectLoadedModules() {
     }
 
     // A Vulkan title hands its kernels to the driver through
-    // VK_NVX_binary_import. The extension function is resolved through
-    // vkGetDeviceProcAddr, and every resolution funnels through the loader.
+    // VK_NVX_binary_import. The extension function is resolved through the
+    // loader's vkGet*ProcAddr, and every resolution funnels through it.
     if (g_vulkan_hooks.load(std::memory_order_acquire))
-        kernels::InstallVulkanHooks();
+        vulkan::InstallLoaderHooks(&VulkanWrapper);
 
     if (HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll"))
         streamline::InstallInterposerHooks(interposer);
 
-    // The plugin patches change how an older GPU paces frames. A GPU that has
-    // hardware flip metering must keep it, so they wait until NVAPI has said
-    // what the GPU really is, and are only applied when it needs them.
-    //
-    // A game's own plugin and one NGX downloaded can both be mapped, and
-    // Streamline picks the newer, so every copy is patched.
+    // Normally the plugin is patched inside its load. This covers a plugin
+    // that loaded before this engine's hooks, or before NVAPI had said what the
+    // GPU is. A game's own plugin and one NGX downloaded can both be mapped,
+    // and Streamline picks the newer, so every copy is patched.
     if (spoof::nvapi::RealArchitecture() == spoof::nvapi::Architecture::Supported) {
-        for (HMODULE plugin : paths::LoadedComponents(L"sl.dlss_g.dll"))
-            streamline::PatchPlugin(plugin);
+        const std::vector<HMODULE> plugins = paths::LoadedComponents(kPluginName);
+        if (!ComponentLoading()) {
+            for (HMODULE plugin : plugins)
+                streamline::PatchPlugin(plugin, false);
+        }
     }
 
     InspectProvider();
@@ -232,19 +318,33 @@ void ReportNvidiaModules() {
 }
 
 // The runtime publishes its capabilities as soon as NGX asks, which can happen
-// before the worker wakes. Rewriting a few bytes suspends no other thread, so
-// unlike installing a hook it is safe here, inside the load.
+// before the worker wakes, so its gates are moved here, on the loading thread,
+// before LoadLibraryExW returns to the caller; `at_load` in
+// multi_frame_unlocked says so. Rewriting a few
+// bytes suspends no other thread, so unlike installing a hook this is safe even
+// when the load is nested inside another DLL's DllMain.
 void PrepareRuntime(HMODULE module) {
-    if (!provider::IsDlssgProvider(module) || !RecordRuntime(module))
+    if (!provider::IsDlssgProvider(module))
         return;
-    provider::UnlockMultiFrame(module, true);
+    // The worker may have recorded the module first, woken by a library the
+    // runtime pulled in while it was loading, so already knowing it is not a
+    // reason to stop. The worker does not claim the gates while the load is
+    // under way. A pin that failed leaves the module unknown, and nothing is
+    // moved.
+    RecordRuntime(module);
+    if (Known(module))
+        MaybeUnlockMultiFrame(module, true);
 }
 
-// Otherwise does the minimum the loader lock allows: wakes the worker. On
-// Windows 10 and later every LoadLibrary variant funnels into LoadLibraryExW, so
-// this one hook sees them all.
-HMODULE WINAPI HookedLoadLibraryExW(LPCWSTR file_name, HANDLE file, DWORD flags) {
-    const bool code = (flags & kDataOnlyLoad) == 0;
+// The plugin patches change how an older GPU paces frames. A GPU that has
+// hardware flip metering must keep it, so they are only applied once NVAPI has
+// said the GPU needs them. Streamline asks long before it loads the plugin.
+void PreparePlugin(HMODULE module) {
+    if (spoof::nvapi::RealArchitecture() == spoof::nvapi::Architecture::Supported)
+        streamline::PatchPlugin(module, true);
+}
+
+HMODULE LoadAndPrepare(LPCWSTR file_name, HANDLE file, DWORD flags, bool code) {
     if (code) {
         if (HMODULE redirected = MaybeRedirect(file_name)) {
             PrepareRuntime(redirected);
@@ -256,9 +356,27 @@ HMODULE WINAPI HookedLoadLibraryExW(LPCWSTR file_name, HANDLE file, DWORD flags)
     if (module && code) {
         if (NamesRuntime(file_name))
             PrepareRuntime(module);
+        else if (NamesComponent(file_name, kPluginName))
+            PreparePlugin(module);
         if (g_wake)
             SetEvent(g_wake);
     }
+    return module;
+}
+
+// Prepares the runtime and the plugin before the load returns; otherwise does
+// the minimum the loader lock allows: wakes the worker. On Windows 10 and later
+// every LoadLibrary variant funnels into LoadLibraryExW, so this one hook sees
+// them all.
+HMODULE WINAPI HookedLoadLibraryExW(LPCWSTR file_name, HANDLE file, DWORD flags) {
+    const bool code = (flags & kDataOnlyLoad) == 0;
+    const bool component =
+        code && (NamesRuntime(file_name) || NamesComponent(file_name, kPluginName));
+    if (!component)
+        return LoadAndPrepare(file_name, file, flags, code);
+    g_component_loads.fetch_add(1, std::memory_order_seq_cst);
+    HMODULE module = LoadAndPrepare(file_name, file, flags, code);
+    g_component_loads.fetch_sub(1, std::memory_order_seq_cst);
     return module;
 }
 

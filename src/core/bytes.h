@@ -9,6 +9,11 @@
 
 namespace odg::bytes {
 
+// `size` bytes at `data`, or an empty span for a null pointer.
+inline std::span<const uint8_t> View(const void* data, size_t size) {
+    return data ? std::span(static_cast<const uint8_t*>(data), size) : std::span<const uint8_t>{};
+}
+
 // Reads a T stored at `offset`, which need not be aligned. Empty when it does
 // not fit inside `data`.
 template <typename T>

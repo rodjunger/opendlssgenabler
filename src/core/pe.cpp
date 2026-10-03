@@ -1,5 +1,6 @@
 #include "core/pe.h"
 
+#include "core/paths.h"
 #include "core/x86.h"
 
 #include <libhat/process.hpp>
@@ -21,15 +22,6 @@ std::vector<std::span<const std::byte>> ReadableSections(HMODULE module) {
     return sections;
 }
 
-HMODULE ModuleOf(const void* address) {
-    HMODULE module = nullptr;
-    if (!address || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                        static_cast<LPCWSTR>(address), &module))
-        return nullptr;
-    return module;
-}
-
 bool PatchCode(const void* code, const void* bytes, size_t size) {
     void* address = const_cast<void*>(code);
     DWORD previous = 0;
@@ -39,6 +31,25 @@ bool PatchCode(const void* code, const void* bytes, size_t size) {
     DWORD ignored = 0;
     VirtualProtect(address, size, previous, &ignored);
     FlushInstructionCache(GetCurrentProcess(), address, size);
+    return true;
+}
+
+bool PatchRunningCode(const void* code, const void* bytes, size_t size) {
+    constexpr uintptr_t kWordSize = sizeof(uint64_t);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(code);
+    const uintptr_t word_start = start & ~(kWordSize - 1);
+    if (!bytes || size == 0 || start + size > word_start + kWordSize)
+        return false;
+    auto* word = reinterpret_cast<volatile LONG64*>(word_start);
+    DWORD previous = 0;
+    if (!VirtualProtect(const_cast<LONG64*>(word), kWordSize, PAGE_EXECUTE_READWRITE, &previous))
+        return false;
+    LONG64 replaced = *word;
+    std::memcpy(reinterpret_cast<std::byte*>(&replaced) + (start - word_start), bytes, size);
+    InterlockedExchange64(word, replaced);
+    DWORD ignored = 0;
+    VirtualProtect(const_cast<LONG64*>(word), kWordSize, previous, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), const_cast<LONG64*>(word), kWordSize);
     return true;
 }
 
@@ -67,26 +78,20 @@ bool RangeReadable(const void* address, size_t size) {
 bool SafeCopy(void* destination, const void* source, size_t size) {
     if (!destination || !source || size == 0)
         return false;
-#ifdef _MSC_VER
-    __try {
-        std::memcpy(destination, source, size);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-#else
+    // Checked rather than caught: the MinGW toolchains have no structured
+    // exception handling for C++. The range can in principle change between
+    // the check and the copy, which nothing this reads does in practice.
     if (!RangeReadable(source, size))
         return false;
     std::memcpy(destination, source, size);
     return true;
-#endif
 }
 
 void* ResolveJumpThunk(void* address) {
     const auto thunk = x86::Decode(static_cast<const std::byte*>(address));
     const auto target = thunk ? x86::JumpTarget(*thunk) : std::nullopt;
-    const HMODULE module = ModuleOf(address);
-    if (!target || !module || ModuleOf(*target) != module)
+    const HMODULE module = paths::ModuleForAddress(address);
+    if (!target || !module || paths::ModuleForAddress(*target) != module)
         return address;
     return const_cast<std::byte*>(*target);
 }

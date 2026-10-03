@@ -12,6 +12,7 @@
 #include "streamline/plugin_patch.h"
 #include "streamline/streamline.h"
 #include "version.h"
+#include "vulkan/reflex_pacing.h"
 
 #include <atomic>
 #include <string>
@@ -119,6 +120,7 @@ void ApplySettings(const Settings& settings, const std::wstring& self_dir) {
 
     ConfigureKernels(settings, log_directory);
     loader::SetVulkanHooksEnabled(settings.vulkan_hooks);
+    vulkan::SetPresentPacingFix(settings.patch_flip_metering);
     if (settings.streamline_diagnostics)
         ArmStreamlineDiagnostics(log_directory);
     ReportHardwareScheduling();
@@ -180,13 +182,6 @@ void Initialize(HMODULE self) {
 
     ApplySettings(settings, self_dir);
     loader::Start();
-}
-
-void Shutdown() {
-    if (!g_initialized.load(std::memory_order_acquire))
-        return;
-    log::Event(log::Level::Info, "detach", {});
-    log::Close();
 }
 
 } // namespace odg::app
