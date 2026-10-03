@@ -144,3 +144,4 @@ All on an RTX 3080.
 | No Man's Sky (Microsoft Store) | Vulkan | 310.7.0, 310.9.0 | Shipped 310.7.0: confirmed working, 145 kernels, none refused. 310.9.0 via the DLSS override: `presented` 2, 3 and 4, 192 kernels, none refused. Streamline ran NGX plugin 134656. Needs the [Reflex pacing fix](ARCHITECTURE.md#reflex-and-present-pacing): without it, 2x dropped output from about 136 fps to 59 |
 | Palworld (Steam) | Direct3D 12 | 310.4.0 | `presented` 2, 3 and 4, 384 kernels, none refused. Needs the `-dx12` launch option (Direct3D 11 is the default and unsupported). Install the proxy as `dxgi.dll`; the game does not load `version.dll` |
 | The Witcher 3 Remastered (Steam) | Direct3D 12 | 310.9.1 | Shipped runtime confirmed: frame generation and Ray Reconstruction both work, 499 kernels, none refused |
+| Marvel's Spider-Man 2 | Direct3D 12 | 310.1.0 | `presented` 2, 3 and 4, 348 kernels, none refused |
